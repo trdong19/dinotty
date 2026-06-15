@@ -29,6 +29,8 @@ WORKDIR /app
 
 # 缓存 Cargo 依赖（写空源码触发依赖编译）
 COPY Cargo.toml Cargo.lock build.rs ./
+# 移除 src-tauri workspace 成员（Docker 构建不需要桌面端）
+RUN sed -i '/members = \["src-tauri"\]/d' Cargo.toml
 RUN mkdir -p src && \
     echo 'fn main() {}' > src/main.rs && \
     echo '' > src/lib.rs && \
