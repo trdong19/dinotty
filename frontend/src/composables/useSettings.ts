@@ -15,13 +15,21 @@ export interface SettingsData {
     } | null
   }
   background: {
+    mode: string
     color: string | null
+    opacity: number
+    has_image: boolean
   }
   text: TextConfig
   bookmarks: CommandBookmark[]
+  workspace_bookmarks: WorkspaceBookmark[]
+  web_bookmarks: WebBookmark[]
+  recent_files: RecentEntry[]
+  recent_urls: RecentEntry[]
   action_keyboard: ActionKeyboardConfig | null
   keyboard_sound: boolean
   show_virtual_keyboard: boolean
+  confirm_before_close_tab: boolean
   locale: string
   panel_position: 'auto' | 'right' | 'left' | 'top' | 'bottom'
   port?: number | null
@@ -66,6 +74,7 @@ export interface MonitorConfig {
   memory: boolean
   disk: boolean
   network: boolean
+  gpu: boolean
 }
 
 export interface TextConfig {
@@ -83,6 +92,27 @@ export interface CommandBookmark {
   name: string
   command: string
   group: string | null
+}
+
+export interface WorkspaceBookmark {
+  id: string
+  name: string
+  path: string
+  is_dir: boolean
+  group: string | null
+}
+
+export interface WebBookmark {
+  id: string
+  name: string
+  url: string
+  group: string | null
+}
+
+export interface RecentEntry {
+  path_or_url: string
+  name: string
+  visited_at: number
 }
 
 export interface ActionKey {
@@ -126,7 +156,7 @@ export const DEFAULT_ACTION_KEYBOARD: ActionKeyboardConfig = {
 
 export const settings = reactive<SettingsData>({
   theme: { preset: 'dark', custom: null },
-  background: { color: null },
+  background: { mode: 'solid', color: null, opacity: 1.0, has_image: false },
   text: {
     font_size: 14,
     font_family: '',
@@ -137,9 +167,14 @@ export const settings = reactive<SettingsData>({
     scrollback: 10000,
   },
   bookmarks: [],
+  workspace_bookmarks: [],
+  web_bookmarks: [],
+  recent_files: [],
+  recent_urls: [],
   action_keyboard: null,
   keyboard_sound: false,
   show_virtual_keyboard: false,
+  confirm_before_close_tab: true,
   locale: 'zh',
   panel_position: 'auto',
   monitor: {
@@ -148,6 +183,7 @@ export const settings = reactive<SettingsData>({
     memory: true,
     disk: true,
     network: true,
+    gpu: true,
   },
   notification: {
     enabled: true,
@@ -179,13 +215,14 @@ export const settings = reactive<SettingsData>({
 })
 
 let loaded = false
+let loadPromise: Promise<void> | null = null
 
 export function useSettings() {
   if (!loaded) {
-    loadSettings()
+    loadPromise = loadSettings()
     loaded = true
   }
-  return { settings, saveSettings, applyCurrentTheme, getCurrentXtermTheme }
+  return { settings, saveSettings, loadSettings, applyCurrentTheme, getCurrentXtermTheme }
 }
 
 function restoreActionIcons() {
@@ -223,11 +260,15 @@ async function loadSettings() {
         localStorage.setItem('dinotty_action_keyboard', JSON.stringify(settings.action_keyboard))
       }
     }
-  } catch {}
+  } catch (e) {
+    console.error('[settings] load failed:', e)
+  }
 }
 
 async function saveSettings() {
   try {
+    // Wait for initial load to complete before saving, to avoid overwriting server data with defaults
+    if (loadPromise) await loadPromise
     // Sync action keyboard to localStorage for static mobile-keyboard.js
     if (settings.action_keyboard) {
       localStorage.setItem('dinotty_action_keyboard', JSON.stringify(settings.action_keyboard))
@@ -235,26 +276,35 @@ async function saveSettings() {
       localStorage.removeItem('dinotty_action_keyboard')
     }
     await getApiBase()
-    await authFetch(apiUrl('/api/settings'), {
+    const res = await authFetch(apiUrl('/api/settings'), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(settings),
     })
-  } catch {}
+    if (!res.ok) {
+      console.error('[settings] save failed:', res.status, await res.text())
+    }
+  } catch (e) {
+    console.error('[settings] save failed:', e)
+  }
 }
 
 const themeChangeListeners = new Set<(xtermTheme: ReturnType<typeof getXtermTheme>) => void>()
 
 export function onThemeChange(fn: (xtermTheme: ReturnType<typeof getXtermTheme>) => void) {
   themeChangeListeners.add(fn)
-  return () => { themeChangeListeners.delete(fn) }
+  return () => {
+    themeChangeListeners.delete(fn)
+  }
 }
 
 const textChangeListeners = new Set<(text: TextConfig) => void>()
 
 export function onTextChange(fn: (text: TextConfig) => void) {
   textChangeListeners.add(fn)
-  return () => { textChangeListeners.delete(fn) }
+  return () => {
+    textChangeListeners.delete(fn)
+  }
 }
 
 export function notifyTextChange() {
@@ -279,10 +329,22 @@ export function applyCurrentTheme() {
     }
     if (custom.ansi) {
       const keys = [
-        '--color-black', '--color-red', '--color-green', '--color-yellow',
-        '--color-blue', '--color-magenta', '--color-cyan', '--color-white',
-        '--color-bright-black', '--color-bright-red', '--color-bright-green', '--color-bright-yellow',
-        '--color-bright-blue', '--color-bright-magenta', '--color-bright-cyan', '--color-bright-white',
+        '--color-black',
+        '--color-red',
+        '--color-green',
+        '--color-yellow',
+        '--color-blue',
+        '--color-magenta',
+        '--color-cyan',
+        '--color-white',
+        '--color-bright-black',
+        '--color-bright-red',
+        '--color-bright-green',
+        '--color-bright-yellow',
+        '--color-bright-blue',
+        '--color-bright-magenta',
+        '--color-bright-cyan',
+        '--color-bright-white',
       ]
       custom.ansi.forEach((c, i) => {
         if (c) document.documentElement.style.setProperty(keys[i], c)
@@ -320,8 +382,24 @@ export function getCurrentXtermTheme() {
     if (custom.background) xtermTheme.background = custom.background
     if (custom.cursor) xtermTheme.cursor = custom.cursor
     if (custom.ansi) {
-      const keys = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white',
-        'brightBlack', 'brightRed', 'brightGreen', 'brightYellow', 'brightBlue', 'brightMagenta', 'brightCyan', 'brightWhite'] as const
+      const keys = [
+        'black',
+        'red',
+        'green',
+        'yellow',
+        'blue',
+        'magenta',
+        'cyan',
+        'white',
+        'brightBlack',
+        'brightRed',
+        'brightGreen',
+        'brightYellow',
+        'brightBlue',
+        'brightMagenta',
+        'brightCyan',
+        'brightWhite',
+      ] as const
       custom.ansi.forEach((c, i) => {
         if (c) (xtermTheme as any)[keys[i]] = c
       })

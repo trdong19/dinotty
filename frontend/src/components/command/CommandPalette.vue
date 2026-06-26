@@ -7,7 +7,7 @@
           ref="inputRef"
           id="palette-input"
           type="text"
-          placeholder="Search commands…"
+          :placeholder="t('palette.search')"
           autocomplete="off"
           spellcheck="false"
           v-model="query"
@@ -15,7 +15,7 @@
         />
       </div>
       <div id="palette-list">
-        <div v-if="filtered.length === 0" id="palette-empty">No matching commands</div>
+        <div v-if="filtered.length === 0" id="palette-empty">{{ t('palette.empty') }}</div>
         <div
           v-for="(cmd, i) in filtered"
           :key="i"
@@ -41,6 +41,9 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
 import { Search } from 'lucide-vue-next'
+import { useI18n } from '../../composables/useI18n'
+
+const { t } = useI18n()
 
 export interface Command {
   icon?: string
@@ -73,7 +76,9 @@ const filtered = computed(() => {
     })
 })
 
-watch(query, () => { selected.value = 0 })
+watch(query, () => {
+  selected.value = 0
+})
 
 function open() {
   isOpen.value = true
@@ -98,7 +103,12 @@ function openWithItems(items: Command[]) {
 }
 
 function onKey(e: KeyboardEvent) {
-  if (e.key === 'Escape') { close(); return }
+  if (e.key === 'Escape') {
+    close()
+    return
+  }
+  // Don't execute during IME composition (Chinese/Japanese/Korean input)
+  if (e.isComposing) return
   if (e.key === 'ArrowDown') {
     e.preventDefault()
     selected.value = Math.min(selected.value + 1, filtered.value.length - 1)
@@ -113,17 +123,26 @@ function onKey(e: KeyboardEvent) {
 
 function execute(i: number) {
   const cmd = filtered.value[i]
-  if (!cmd) return
+  if (!cmd || typeof cmd.action !== 'function') return
   close()
-  setTimeout(() => cmd.action(), 10)
+  setTimeout(() => {
+    try {
+      cmd.action()
+    } catch (e) {
+      console.error('[palette] command action error:', e)
+    }
+  }, 10)
 }
 
 function fuzzyMatch(str: string, q: string): number | null {
   const s = str.toLowerCase()
-  let si = 0, qi = 0, score = 0, lastMatch = -1
+  let si = 0,
+    qi = 0,
+    score = 0,
+    lastMatch = -1
   while (si < s.length && qi < q.length) {
     if (s[si] === q[qi]) {
-      score += (si - lastMatch - 1)
+      score += si - lastMatch - 1
       lastMatch = si
       qi++
     }
@@ -141,15 +160,19 @@ function highlightTitle(title: string) {
   if (!q) return escHtml(title)
   const s = title.toLowerCase()
   const positions = new Set<number>()
-  let si = 0, qi = 0
+  let si = 0,
+    qi = 0
   while (si < s.length && qi < q.length) {
-    if (s[si] === q[qi]) { positions.add(si); qi++ }
+    if (s[si] === q[qi]) {
+      positions.add(si)
+      qi++
+    }
     si++
   }
   if (qi < q.length) return escHtml(title)
-  return [...title].map((c, i) =>
-    positions.has(i) ? `<mark>${escHtml(c)}</mark>` : escHtml(c)
-  ).join('')
+  return [...title]
+    .map((c, i) => (positions.has(i) ? `<mark>${escHtml(c)}</mark>` : escHtml(c)))
+    .join('')
 }
 
 defineExpose({ open, close, toggle, openWithItems })

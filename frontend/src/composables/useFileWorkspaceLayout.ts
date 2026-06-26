@@ -27,7 +27,9 @@ function loadTreePaneWidth(): number {
 }
 
 function persistTreePaneWidth(w: number) {
-  try { localStorage.setItem(TREE_WIDTH_STORAGE, String(w)) } catch {}
+  try {
+    localStorage.setItem(TREE_WIDTH_STORAGE, String(w))
+  } catch {}
 }
 
 export function useFileWorkspaceLayout(): FileWorkspaceLayout {
@@ -36,7 +38,9 @@ export function useFileWorkspaceLayout(): FileWorkspaceLayout {
   const drawerOpen = ref(isNarrowViewport())
   const treePaneWidth = ref(loadTreePaneWidth())
 
-  const direction = computed(() => (isLandscape.value ? 'horizontal' : 'vertical') as 'horizontal' | 'vertical')
+  const direction = computed(
+    () => (isLandscape.value ? 'horizontal' : 'vertical') as 'horizontal' | 'vertical'
+  )
 
   const treeWrapStyle = computed((): Record<string, string> => {
     if (narrow.value) return { width: `${treePaneWidth.value}px` }
@@ -77,6 +81,7 @@ export function useFileWorkspaceLayout(): FileWorkspaceLayout {
     const startX = e.touches[0].clientX
     const startW = treePaneWidth.value
     const onMove = (ev: TouchEvent) => {
+      ev.preventDefault()
       const touch = ev.touches[0]
       const rect = body.getBoundingClientRect()
       const maxW = Math.min(rect.width * 0.78, 560)
@@ -88,7 +93,7 @@ export function useFileWorkspaceLayout(): FileWorkspaceLayout {
       window.removeEventListener('touchend', onEnd)
       persistTreePaneWidth(treePaneWidth.value)
     }
-    window.addEventListener('touchmove', onMove, { passive: true })
+    window.addEventListener('touchmove', onMove, { passive: false })
     window.addEventListener('touchend', onEnd)
   }
 
@@ -108,9 +113,17 @@ export function useFileWorkspaceLayout(): FileWorkspaceLayout {
   }
 
   return {
-    narrow, isLandscape, drawerOpen, treePaneWidth,
-    direction, treeWrapStyle,
-    startTreeWidthDrag, startTreeWidthDragTouch, clampTreePaneWidth,
-    onResize, toggleDrawer, openDrawer,
+    narrow,
+    isLandscape,
+    drawerOpen,
+    treePaneWidth,
+    direction,
+    treeWrapStyle,
+    startTreeWidthDrag,
+    startTreeWidthDragTouch,
+    clampTreePaneWidth,
+    onResize,
+    toggleDrawer,
+    openDrawer,
   }
 }

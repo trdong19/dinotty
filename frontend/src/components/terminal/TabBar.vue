@@ -1,48 +1,105 @@
 <template>
   <div id="tab-bar">
-    <div id="tabs-list">
+    <!-- Mobile compact mode -->
+    <template v-if="isMobile">
+      <button class="mc-trigger" @click="$emit('open-overview')">
+        <LayoutDashboard :size="16" />
+      </button>
+      <span class="current-tab-index">{{ currentTabIndex }}</span>
+      <span class="current-tab-name">{{ currentTabTitle }}</span>
+    </template>
+    <!-- Desktop mode: full tab list -->
+    <div v-else id="tabs-list">
       <div
         v-for="tab in tabs"
         :key="tab.paneId"
         class="tab"
         :class="{ active: tab.paneId === activePaneId, 'drag-over': dragOverId === tab.paneId }"
-        draggable="true"
-        @dragstart="onDragStart($event, tab.paneId)"
-        @dragover.prevent="onDragOver(tab.paneId)"
-        @dragleave="onDragLeave(tab.paneId)"
-        @drop.prevent="onDrop(tab.paneId)"
-        @dragend="onDragEnd"
-        @click="$emit('activate', tab.paneId)"
-        @touchend.prevent="$emit('activate', tab.paneId)"
+        :data-pane-id="tab.paneId"
+        @mousedown.prevent="onTabMouseDown($event, tab.paneId)"
+        @touchstart="onTabTouchStart($event, tab.paneId)"
+        @click="onTabClick($event, tab.paneId)"
+        @touchend.prevent="onTabTouchEnd($event, tab.paneId)"
       >
-        <span class="tab-title">{{ tab.title }}</span>
-        <span v-if="indicators[tab.paneId]" class="tab-notif-dot" :class="'dot-' + indicators[tab.paneId]"></span>
-        <button class="tab-close" @click.stop="$emit('close', tab.paneId)" @touchend.stop.prevent="$emit('close', tab.paneId)"><X :size="10" /></button>
+        <span class="tab-index">{{ tab.index }}</span>
+        <input
+          v-if="editingPaneId === tab.paneId"
+          ref="editInputRef"
+          class="tab-title-input"
+          :value="editValue"
+          @input="editValue = ($event.target as HTMLInputElement).value"
+          @blur="finishEdit(tab.paneId)"
+          @keydown.enter="finishEdit(tab.paneId)"
+          @keydown.escape.stop="cancelEdit"
+          @mousedown.stop
+          @click.stop
+        />
+        <span
+          v-else
+          class="tab-title"
+          @dblclick="startEdit(tab)"
+        >{{ tab.title }}</span>
+        <span
+          v-if="indicators[tab.paneId]"
+          class="tab-notif-dot"
+          :class="'dot-' + indicators[tab.paneId]"
+        ></span>
+        <button
+          v-if="editingPaneId !== tab.paneId"
+          class="tab-close"
+          @click.stop="$emit('close', tab.paneId)"
+          @touchend.stop.prevent="$emit('close', tab.paneId)"
+        >
+          <X :size="10" />
+        </button>
       </div>
     </div>
     <slot name="left" />
     <div class="new-tab-split" ref="newMenuWrapRef">
-      <button id="tab-new-btn" title="New Tab (⌘T)" @click="newMenuOpen = !newMenuOpen" @touchend.prevent="newMenuOpen = !newMenuOpen"><Terminal :size="16" /></button>
+      <button
+        id="tab-new-btn"
+        title="New Tab (⌘T)"
+        @click="newMenuOpen = !newMenuOpen"
+        @touchend.prevent="newMenuOpen = !newMenuOpen"
+      >
+        <Terminal :size="16" />
+      </button>
       <div v-if="newMenuOpen" class="new-menu-dropdown" @mouseleave="newMenuOpen = false">
-        <div class="new-menu-item" @click="emitAction('new-tab')" @touchend.prevent="emitAction('new-tab')">
+        <div
+          class="new-menu-item"
+          @click="emitAction('new-tab')"
+          @touchend.prevent="emitAction('new-tab')"
+        >
           <Terminal :size="14" class="new-menu-icon" />
           <span class="new-menu-label">{{ t('keybinding.newTab') }}</span>
           <kbd class="new-menu-kbd">{{ kbdNewTab }}</kbd>
         </div>
         <div class="new-menu-sep" />
-        <div class="new-menu-item" @click="emitAction('split-h')" @touchend.prevent="emitAction('split-h')">
+        <div
+          class="new-menu-item"
+          @click="emitAction('split-h')"
+          @touchend.prevent="emitAction('split-h')"
+        >
           <Columns2 :size="14" class="new-menu-icon" />
           <span class="new-menu-label">{{ t('keybinding.splitHorizontal') }}</span>
           <kbd class="new-menu-kbd">{{ kbdSplitH }}</kbd>
         </div>
-        <div class="new-menu-item" @click="emitAction('split-v')" @touchend.prevent="emitAction('split-v')">
+        <div
+          class="new-menu-item"
+          @click="emitAction('split-v')"
+          @touchend.prevent="emitAction('split-v')"
+        >
           <Rows2 :size="14" class="new-menu-icon" />
           <span class="new-menu-label">{{ t('keybinding.splitVertical') }}</span>
           <kbd class="new-menu-kbd">{{ kbdSplitV }}</kbd>
         </div>
         <template v-if="canBroadcast">
           <div class="new-menu-sep" />
-          <div class="new-menu-item" @click="emitAction('broadcast')" @touchend.prevent="emitAction('broadcast')">
+          <div
+            class="new-menu-item"
+            @click="emitAction('broadcast')"
+            @touchend.prevent="emitAction('broadcast')"
+          >
             <Radio :size="14" class="new-menu-icon" />
             <span class="new-menu-label">{{ t('split.toggleBroadcast') }}</span>
             <kbd class="new-menu-kbd">{{ kbdBroadcast }}</kbd>
@@ -52,14 +109,28 @@
       </div>
     </div>
     <div v-if="plugins.length > 0" class="tab-bar-plugin-wrap" ref="pluginWrapRef">
-      <button type="button" class="tab-bar-icon-btn" title="Plugins" @click="pluginMenuOpen = !pluginMenuOpen" @touchend.prevent="pluginMenuOpen = !pluginMenuOpen"><Blocks :size="16" /></button>
+      <button
+        type="button"
+        class="tab-bar-icon-btn"
+        title="Plugins"
+        @click="pluginMenuOpen = !pluginMenuOpen"
+        @touchend.prevent="pluginMenuOpen = !pluginMenuOpen"
+      >
+        <Puzzle :size="16" />
+      </button>
       <div v-if="pluginMenuOpen" class="plugin-dropdown" @mouseleave="pluginMenuOpen = false">
         <div
           v-for="p in plugins"
           :key="p.id"
           class="plugin-dropdown-item"
-          @click="$emit('open-plugin', p.id); pluginMenuOpen = false"
-          @touchend.prevent="$emit('open-plugin', p.id); pluginMenuOpen = false"
+          @click="
+            $emit('open-plugin', p.id);
+            pluginMenuOpen = false;
+          "
+          @touchend.prevent="
+            $emit('open-plugin', p.id);
+            pluginMenuOpen = false;
+          "
         >
           <span class="plugin-dropdown-name">{{ p.name }}</span>
           <span v-if="p.description" class="plugin-dropdown-desc">{{ p.description }}</span>
@@ -71,8 +142,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onBeforeUnmount } from 'vue'
-import { X, Terminal, Blocks, Columns2, Rows2, Radio } from 'lucide-vue-next'
+import { ref, watch, onBeforeUnmount, nextTick } from 'vue'
+import { X, Terminal, Puzzle, Columns2, Rows2, Radio, LayoutDashboard } from 'lucide-vue-next'
 import { useI18n } from '../../composables/useI18n'
 import { useKeybindings } from '../../composables/useKeybindings'
 
@@ -86,6 +157,8 @@ const kbdBroadcast = formatBinding(getBinding('toggleBroadcast')).join('')
 export interface TabInfo {
   paneId: string
   title: string
+  index: number
+  type: 'terminal' | 'plugin'
 }
 
 export interface PluginInfo {
@@ -96,19 +169,28 @@ export interface PluginInfo {
   state: string
 }
 
-withDefaults(defineProps<{
-  tabs: TabInfo[]
-  activePaneId: string | null
-  indicators?: Record<string, string>
-  plugins?: PluginInfo[]
-  canBroadcast?: boolean
-  broadcastActive?: boolean
-}>(), {
-  indicators: () => ({}),
-  plugins: () => ([]),
-  canBroadcast: false,
-  broadcastActive: false,
-})
+withDefaults(
+  defineProps<{
+    tabs: TabInfo[]
+    activePaneId: string | null
+    indicators?: Record<string, string>
+    plugins?: PluginInfo[]
+    canBroadcast?: boolean
+    broadcastActive?: boolean
+    isMobile?: boolean
+    currentTabTitle?: string
+    currentTabIndex?: number
+  }>(),
+  {
+    indicators: () => ({}),
+    plugins: () => [],
+    canBroadcast: false,
+    broadcastActive: false,
+    isMobile: false,
+    currentTabTitle: '',
+    currentTabIndex: 0,
+  }
+)
 
 const emit = defineEmits<{
   activate: [paneId: string]
@@ -116,7 +198,53 @@ const emit = defineEmits<{
   action: [type: 'new-tab' | 'split-h' | 'split-v' | 'broadcast']
   reorder: [fromId: string, toId: string]
   'open-plugin': [pluginId: string]
+  rename: [paneId: string, title: string]
+  'open-overview': []
 }>()
+
+const editingPaneId = ref<string | null>(null)
+const editValue = ref('')
+const editInputRef = ref<HTMLInputElement | null>(null)
+
+function onDocMouseDown(e: MouseEvent) {
+  const el = e.target as HTMLElement
+  if (!el.closest('.tab-title-input')) {
+    finishEditIfAny()
+  }
+}
+
+function finishEditIfAny() {
+  if (editingPaneId.value != null) {
+    finishEdit(editingPaneId.value)
+  }
+}
+
+function startEdit(tab: TabInfo) {
+  if (tab.type !== 'terminal') return
+  editingPaneId.value = tab.paneId
+  editValue.value = tab.title
+  document.addEventListener('mousedown', onDocMouseDown)
+  nextTick(() => {
+    const input = editInputRef.value
+    if (input) {
+      input.focus()
+      input.select()
+    }
+  })
+}
+
+function finishEdit(paneId: string) {
+  if (editingPaneId.value !== paneId) return
+  const val = editValue.value.trim()
+  editingPaneId.value = null
+  document.removeEventListener('mousedown', onDocMouseDown)
+  if (val) emit('rename', paneId, val)
+}
+
+function cancelEdit() {
+  editingPaneId.value = null
+  document.removeEventListener('mousedown', onDocMouseDown)
+}
 
 const pluginMenuOpen = ref(false)
 const pluginWrapRef = ref<HTMLElement>()
@@ -145,52 +273,164 @@ watch([pluginMenuOpen, newMenuOpen], ([pluginOpen, newOpen]) => {
   }
 })
 
-onBeforeUnmount(() => {
-  document.removeEventListener('touchstart', onDocTouchStart)
-})
-
-const dragFromId = ref<string | null>(null)
 const dragOverId = ref<string | null>(null)
 
-function onDragStart(e: DragEvent, paneId: string) {
-  dragFromId.value = paneId
-  if (e.dataTransfer) {
-    e.dataTransfer.effectAllowed = 'move'
+let dragFromId: string | null = null
+let dragStarted = false
+let startX = 0
+let startY = 0
+let isTouchDrag = false
+let suppressClick = false
+const DRAG_THRESHOLD = 5
+
+function getPointerPos(e: MouseEvent | TouchEvent): { clientX: number; clientY: number } {
+  if ('touches' in e) {
+    const t = e.touches[0]
+    return { clientX: t.clientX, clientY: t.clientY }
   }
+  return { clientX: e.clientX, clientY: e.clientY }
 }
 
-function onDragOver(paneId: string) {
-  if (dragFromId.value && dragFromId.value !== paneId) {
-    dragOverId.value = paneId
-  }
+function onTabMouseDown(e: MouseEvent, paneId: string) {
+  if (e.button !== 0) return
+  suppressClick = false
+  startDrag(e, paneId, false)
 }
 
-function onDragLeave(paneId: string) {
-  if (dragOverId.value === paneId) {
-    dragOverId.value = null
-  }
+function onTabTouchStart(e: TouchEvent, paneId: string) {
+  if (e.touches.length !== 1) return
+  suppressClick = false
+  startDrag(e, paneId, true)
 }
 
-function onDrop(paneId: string) {
-  if (dragFromId.value && dragFromId.value !== paneId) {
-    emit('reorder', dragFromId.value, paneId)
+function onTabClick(e: MouseEvent, paneId: string) {
+  if (suppressClick) {
+    e.preventDefault()
+    e.stopPropagation()
+    suppressClick = false
+    return
   }
-  dragFromId.value = null
+  emit('activate', paneId)
+}
+
+function onTabTouchEnd(e: TouchEvent, paneId: string) {
+  if (suppressClick) {
+    suppressClick = false
+    return
+  }
+  emit('activate', paneId)
+}
+
+function startDrag(e: MouseEvent | TouchEvent, paneId: string, isTouch: boolean) {
+  const pos = getPointerPos(e)
+  startX = pos.clientX
+  startY = pos.clientY
+  dragStarted = false
+  isTouchDrag = isTouch
+  dragFromId = paneId
+
+  const moveEvent = isTouch ? 'touchmove' : 'mousemove'
+  const endEvent = isTouch ? 'touchend' : 'mouseup'
+
+  window.addEventListener(
+    moveEvent,
+    onPointerMove as EventListener,
+    { passive: !isTouch } as AddEventListenerOptions
+  )
+  window.addEventListener(endEvent, onPointerEnd)
+}
+
+function onPointerMove(e: MouseEvent | TouchEvent) {
+  const pos = getPointerPos(e)
+  if (!dragStarted) {
+    if (
+      Math.abs(pos.clientX - startX) < DRAG_THRESHOLD &&
+      Math.abs(pos.clientY - startY) < DRAG_THRESHOLD
+    ) {
+      return
+    }
+    dragStarted = true
+    // Only prevent scroll once drag gesture is confirmed
+    if (isTouchDrag) {
+      e.preventDefault()
+    }
+  } else if (isTouchDrag) {
+    e.preventDefault()
+  }
+
+  // Find tab element under cursor
+  const el = document.elementFromPoint(pos.clientX, pos.clientY)
+  let targetId: string | null = null
+  if (el) {
+    const tabEl = el.closest('.tab[data-pane-id]') as HTMLElement | null
+    if (tabEl) {
+      const pid = tabEl.dataset.paneId
+      if (pid && pid !== dragFromId) {
+        targetId = pid
+      }
+    }
+  }
+
+  dragOverId.value = targetId
+}
+
+function onPointerEnd() {
+  if (dragStarted && dragFromId && dragOverId.value && dragFromId !== dragOverId.value) {
+    suppressClick = true
+    emit('reorder', dragFromId, dragOverId.value)
+  }
+
+  cleanup()
+}
+
+function cleanup() {
+  dragStarted = false
+  dragFromId = null
   dragOverId.value = null
+
+  window.removeEventListener('mousemove', onPointerMove as EventListener)
+  window.removeEventListener('mouseup', onPointerEnd)
+  window.removeEventListener('touchmove', onPointerMove as EventListener)
+  window.removeEventListener('touchend', onPointerEnd)
 }
 
-function onDragEnd() {
-  dragFromId.value = null
-  dragOverId.value = null
-}
+onBeforeUnmount(() => {
+  cleanup()
+  document.removeEventListener('mousedown', onDocMouseDown)
+  document.removeEventListener('touchstart', onDocTouchStart)
+})
 </script>
 
 <style scoped>
-.tab[draggable="true"] {
+.tab-index {
+  font-size: 10px;
+  color: var(--text-muted, #888);
+  min-width: 12px;
+  text-align: center;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+.tab-title-input {
+  background: var(--bg-input, #2a2a2a);
+  border: 1px solid var(--accent, #8a8a8a);
+  border-radius: 3px;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  padding: 0 4px;
+  min-width: 0;
+  width: 100%;
+  max-width: 160px;
+  outline: none;
+}
+.tab {
   cursor: grab;
 }
+.tab:active {
+  cursor: grabbing;
+}
 .tab.drag-over {
-  border-left: 2px solid var(--accent, #8A8A8A);
+  border-left: 2px solid var(--accent, #8a8a8a);
 }
 .tab-notif-dot {
   width: 7px;
@@ -199,14 +439,30 @@ function onDragEnd() {
   flex-shrink: 0;
   margin-left: 4px;
 }
-.dot-info { background: var(--accent, #8A8A8A); }
-.dot-success { background: var(--color-green, #34d399); }
-.dot-warning { background: var(--color-yellow, #f59e0b); }
-.dot-error { background: var(--color-red, #ef4444); }
-.dot-urgent { background: var(--color-red, #ef4444); animation: pulse-dot 1.5s infinite; }
+.dot-info {
+  background: var(--accent, #8a8a8a);
+}
+.dot-success {
+  background: var(--color-green, #34d399);
+}
+.dot-warning {
+  background: var(--color-yellow, #f59e0b);
+}
+.dot-error {
+  background: var(--color-red, #ef4444);
+}
+.dot-urgent {
+  background: var(--color-red, #ef4444);
+  animation: pulse-dot 1.5s infinite;
+}
 @keyframes pulse-dot {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
 }
 .tab-bar-plugin-wrap {
   position: relative;
@@ -221,7 +477,7 @@ function onDragEnd() {
   border-radius: 6px;
   padding: 4px 0;
   z-index: 500;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 .plugin-dropdown-item {
   padding: 6px 12px;
@@ -258,7 +514,7 @@ function onDragEnd() {
   border-radius: 6px;
   padding: 4px 0;
   z-index: 500;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 .new-menu-item {
   display: flex;
@@ -295,7 +551,7 @@ function onDragEnd() {
 }
 .new-menu-status {
   font-size: 11px;
-  color: var(--accent, #8A8A8A);
+  color: var(--accent, #8a8a8a);
   padding: 2px 12px 6px;
 }
 </style>

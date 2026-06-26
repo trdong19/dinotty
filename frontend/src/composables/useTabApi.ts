@@ -18,6 +18,17 @@ export interface ClosePaneResult {
   active_pane_id?: string
 }
 
+export interface ListTabsResult {
+  tabs: Array<{ tab_id: string; pane_id: string; layout?: any; active_pane_id?: string }>
+  active_pane_id: string | null
+}
+
+export async function apiListTabs(): Promise<ListTabsResult> {
+  const res = await authFetch(apiUrl('/api/tabs'))
+  if (!res.ok) throw new Error(`list tabs failed: ${res.status}`)
+  return res.json()
+}
+
 export async function apiCreateTab(): Promise<CreateTabResult> {
   const res = await authFetch(apiUrl('/api/tabs'), { method: 'POST' })
   if (!res.ok) throw new Error(`create tab failed: ${res.status}`)
@@ -29,7 +40,11 @@ export async function apiCloseTab(tabId: string): Promise<void> {
   if (!res.ok) throw new Error(`close tab failed: ${res.status}`)
 }
 
-export async function apiSplitPane(tabId: string, paneId: string, direction: string): Promise<SplitPaneResult> {
+export async function apiSplitPane(
+  tabId: string,
+  paneId: string,
+  direction: string
+): Promise<SplitPaneResult> {
   const res = await authFetch(apiUrl(`/api/tabs/${tabId}/pane`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -46,11 +61,17 @@ export async function apiClosePane(tabId: string, paneId: string): Promise<Close
 }
 
 export async function apiActivatePane(tabId: string, paneId: string): Promise<void> {
-  const res = await authFetch(apiUrl(`/api/tabs/${tabId}/pane/${paneId}/activate`), { method: 'PUT' })
+  const res = await authFetch(apiUrl(`/api/tabs/${tabId}/pane/${paneId}/activate`), {
+    method: 'PUT',
+  })
   if (!res.ok) throw new Error(`activate pane failed: ${res.status}`)
 }
 
-export async function apiUpdateLayout(tabId: string, layout: any, activePaneId: string): Promise<void> {
+export async function apiUpdateLayout(
+  tabId: string,
+  layout: any,
+  activePaneId: string
+): Promise<void> {
   const res = await authFetch(apiUrl(`/api/tabs/${tabId}/layout`), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },

@@ -1,6 +1,6 @@
 <template>
-  <div v-if="monitorSettings.enabled" class="status-bar">
-    <div class="status-bar-metrics">
+  <div v-if="monitorSettings.enabled || warning.message.value" class="status-bar">
+    <div v-if="monitorSettings.enabled" class="status-bar-metrics">
       <button
         v-for="m in visibleMetrics"
         :key="m.key"
@@ -11,6 +11,7 @@
         <span class="metric-value">{{ m.label }}</span>
       </button>
     </div>
+    <span v-if="warning.message.value" class="pane-warning">{{ warning.message.value }}</span>
 
     <MonitorPopover
       :visible="!!activePopover"
@@ -21,25 +22,38 @@
       :mem-history="memHistory"
       :net-rx-history="netRxHistory"
       :net-tx-history="netTxHistory"
+      :gpu-util-history="gpuUtilHistory"
+      :gpu-mem-history="gpuMemHistory"
       @close="activePopover = null"
     />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { Cpu, MemoryStick, HardDrive, Wifi } from 'lucide-vue-next'
+import { computed, ref, defineAsyncComponent } from 'vue'
+import { Cpu, MemoryStick, HardDrive, Wifi, Gpu } from 'lucide-vue-next'
 import { monitorData } from '../../composables/useMonitor'
-import { cpuHistory, memHistory, netRxHistory, netTxHistory } from '../../composables/useMonitor'
+import {
+  cpuHistory,
+  memHistory,
+  netRxHistory,
+  netTxHistory,
+  gpuUtilHistory,
+  gpuMemHistory,
+} from '../../composables/useMonitor'
 import { useSettings } from '../../composables/useSettings'
-import MonitorPopover from './MonitorPopover.vue'
+import { usePaneWarning } from '../../composables/usePaneWarning'
+const MonitorPopover = defineAsyncComponent(() => import('./MonitorPopover.vue'))
 
 const data = monitorData
 const { settings } = useSettings()
+const warning = usePaneWarning()
 
-const monitorSettings = computed(() => settings.monitor ?? { enabled: true, cpu: true, memory: true, disk: true, network: true })
+const monitorSettings = computed(
+  () => settings.monitor ?? { enabled: true, cpu: true, memory: true, disk: true, network: true }
+)
 
-type MetricKey = 'cpu' | 'memory' | 'disk' | 'network'
+type MetricKey = 'cpu' | 'memory' | 'disk' | 'network' | 'gpu'
 
 const activePopover = ref<MetricKey | null>(null)
 const anchorRect = ref<DOMRect | null>(null)
@@ -70,7 +84,7 @@ const allMetrics = computed(() => {
   const totalRx = d.network.reduce((s, n) => s + n.rx_rate, 0)
   const totalTx = d.network.reduce((s, n) => s + n.tx_rate, 0)
 
-  return [
+  const metrics = [
     { key: 'cpu' as MetricKey, icon: Cpu, label: `${d.cpu.usage.toFixed(0)}%` },
     {
       key: 'memory' as MetricKey,
@@ -80,9 +94,7 @@ const allMetrics = computed(() => {
     {
       key: 'disk' as MetricKey,
       icon: HardDrive,
-      label: mainDisk
-        ? `${fmtBytes(mainDisk.used)}/${fmtBytes(mainDisk.total)}`
-        : '—',
+      label: mainDisk ? `${fmtBytes(mainDisk.used)}/${fmtBytes(mainDisk.total)}` : '—',
     },
     {
       key: 'network' as MetricKey,
@@ -90,18 +102,29 @@ const allMetrics = computed(() => {
       label: `↑${fmtRate(totalTx)} ↓${fmtRate(totalRx)}`,
     },
   ]
+
+  if (d.gpu?.length > 0) {
+    const totalUsed = d.gpu.reduce((s, g) => s + g.memory_used, 0)
+    const totalMem = d.gpu.reduce((s, g) => s + g.memory_total, 0)
+    const pct = totalMem > 0 ? (totalUsed / totalMem) * 100 : 0
+    metrics.push({
+      key: 'gpu' as MetricKey,
+      icon: Gpu,
+      label: `${fmtBytes(totalUsed * 1024 * 1024)}/${fmtBytes(totalMem * 1024 * 1024)} ${pct.toFixed(0)}%`,
+    })
+  }
+
+  return metrics
 })
 
-const visibleMetrics = computed(() =>
-  allMetrics.value.filter((m) => monitorSettings.value[m.key])
-)
+const visibleMetrics = computed(() => allMetrics.value.filter((m) => monitorSettings.value[m.key]))
 
 function togglePopover(key: MetricKey, event: MouseEvent) {
   if (activePopover.value === key) {
     activePopover.value = null
     return
   }
-  const el = (event.currentTarget as HTMLElement)
+  const el = event.currentTarget as HTMLElement
   anchorRect.value = el.getBoundingClientRect()
   activePopover.value = key
 }
@@ -111,7 +134,7 @@ function togglePopover(key: MetricKey, event: MouseEvent) {
 .status-bar {
   height: calc(24px + env(safe-area-inset-bottom, 0px));
   background: var(--bg, #1a1a2e);
-  border-top: 1px solid var(--border, #3C3C3C);
+  border-top: 1px solid var(--border, #3c3c3c);
   display: flex;
   align-items: center;
   justify-content: flex-start;
@@ -145,5 +168,18 @@ function togglePopover(key: MetricKey, event: MouseEvent) {
 }
 .metric-value {
   font-variant-numeric: tabular-nums;
+}
+.pane-warning {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--fg-muted, rgba(255, 255, 255, 0.6));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: warning-fade 4s ease-in forwards;
+}
+@keyframes warning-fade {
+  0%, 70% { opacity: 1; }
+  100% { opacity: 0; }
 }
 </style>

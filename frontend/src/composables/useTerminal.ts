@@ -2,6 +2,7 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebglAddon } from '@xterm/addon-webgl'
+import { SearchAddon } from '@xterm/addon-search'
 import type { ClientMsg, ServerMsg } from '../types/protocol'
 import { isTauri, createTransport, type Transport } from './useTransport'
 import { onThemeChange, settings, onTextChange } from './useSettings'
@@ -13,6 +14,12 @@ export function isTouchDevice(): boolean {
 
 let tauriDragDropRegistered = false
 let lastFocusedInstance: TerminalInstance | null = null
+
+// Guard for Tauri WKWebView multi-focus: only the active pane should send input.
+let _activePaneId: string | null = null
+export function setActivePaneId(paneId: string | null) {
+  _activePaneId = paneId
+}
 
 function setupGlobalTauriDragDrop() {
   if (tauriDragDropRegistered) return
@@ -37,6 +44,7 @@ export class TerminalInstance {
   paneId: string
   xterm: XTerm | null = null
   fitAddon: FitAddon | null = null
+  searchAddon: SearchAddon | null = null
   ws: WebSocket | null = null
   private _transport: Transport | null = null
 
@@ -57,7 +65,12 @@ export class TerminalInstance {
   private _refitRaf: number = 0
   private _lastCols = 0
   private _lastRows = 0
+  private _lastInputData = ''
+  private _lastInputTime = 0
   touchMoved = false
+  inTouchSelection = false
+  selStartRow = 0
+  selStartCol = 0
   private _visibilityHandler: (() => void) | null = null
   private _dragDropCleanup: (() => void) | null = null
   private _initialResizeTimer: ReturnType<typeof setInterval> | null = null
@@ -66,8 +79,8 @@ export class TerminalInstance {
   onShellInfo: ((shell: string) => void) | null = null
   onConnect: (() => void) | null = null
   onDisconnect: (() => void) | null = null
-  onFileClick: ((path: string) => void) | null = null
-  onPreviewLink: ((url: string) => void) | null = null
+  onFileClick: ((path: string, x?: number, y?: number) => void) | null = null
+  onPreviewLink: ((url: string, x?: number, y?: number) => void) | null = null
   onRawOutput: ((data: string) => void) | null = null
   onInput: ((data: string) => void) | null = null
 
@@ -140,7 +153,12 @@ export class TerminalInstance {
       const webgl = new WebglAddon()
       webgl.onContextLoss(() => webgl.dispose())
       this.xterm.loadAddon(webgl)
-    } catch { /* DOM renderer fallback */ }
+    } catch {
+      /* DOM renderer fallback */
+    }
+
+    this.searchAddon = new SearchAddon()
+    this.xterm.loadAddon(this.searchAddon)
 
     const textarea = wrapper.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null
     if (textarea && isTouchDevice()) {
@@ -148,18 +166,29 @@ export class TerminalInstance {
       textarea.setAttribute('virtualkeyboardpolicy', 'manual')
     }
     if (textarea) {
+      let isComposing = false
       let compositionJustEnded = false
       let compositionData = ''
-      const onCompositionEnd = (e: Event) => {
+      const onCompositionStart = () => {
+        isComposing = true
+      }
+      const onCompositionEnd = () => {
+        isComposing = false
         compositionJustEnded = true
         compositionData = ''
-        setTimeout(() => { compositionJustEnded = false; compositionData = '' }, 0)
+        setTimeout(() => {
+          compositionJustEnded = false
+          compositionData = ''
+        }, 50)
       }
+      textarea.addEventListener('compositionstart', onCompositionStart)
       textarea.addEventListener('compositionend', onCompositionEnd)
       this._compositionCleanup = () => {
+        textarea.removeEventListener('compositionstart', onCompositionStart)
         textarea.removeEventListener('compositionend', onCompositionEnd)
       }
       this._compositionGuard = (data: string): boolean => {
+        if (isComposing) return false
         if (!compositionJustEnded) return true
         if (compositionData === '') {
           compositionData = data
@@ -174,7 +203,10 @@ export class TerminalInstance {
     this.xterm.registerLinkProvider({
       provideLinks: (bufferLineNumber: number, callback: (links: any[] | undefined) => void) => {
         const line = this.xterm!.buffer.active.getLine(bufferLineNumber - 1)
-        if (!line) { callback(undefined); return }
+        if (!line) {
+          callback(undefined)
+          return
+        }
         const text = line.translateToString()
         const regex = /(?:^|\s)((?:\/|\.\/|~\/)[^\s:]+)/g
         const links: any[] = []
@@ -183,9 +215,14 @@ export class TerminalInstance {
           const path = match[1]
           const startX = match.index + (match[0].length - match[1].length)
           links.push({
-            range: { start: { x: startX + 1, y: bufferLineNumber }, end: { x: startX + path.length + 1, y: bufferLineNumber } },
+            range: {
+              start: { x: startX + 1, y: bufferLineNumber },
+              end: { x: startX + path.length + 1, y: bufferLineNumber },
+            },
             text: path,
-            activate: () => { this.onFileClick?.(path) },
+            activate: (event: MouseEvent) => {
+              this.onFileClick?.(path, event.clientX, event.clientY)
+            },
           })
         }
         callback(links.length > 0 ? links : undefined)
@@ -196,9 +233,13 @@ export class TerminalInstance {
     this.xterm.registerLinkProvider({
       provideLinks: (bufferLineNumber: number, callback: (links: any[] | undefined) => void) => {
         const line = this.xterm!.buffer.active.getLine(bufferLineNumber - 1)
-        if (!line) { callback(undefined); return }
+        if (!line) {
+          callback(undefined)
+          return
+        }
         const text = line.translateToString()
-        const regex = /(?:https?:\/\/[^\s"'<>]+|(?:www\.)[a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z]{2,})+(?:\/[^\s"'<>]*)?)/g
+        const regex =
+          /(?:https?:\/\/[^\s"'<>]+|(?:www\.)[a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z]{2,})+(?:\/[^\s"'<>]*)?)/g
         const links: any[] = []
         let match
         while ((match = regex.exec(text)) !== null) {
@@ -206,11 +247,14 @@ export class TerminalInstance {
           const uri = raw.startsWith('http') ? raw : `http://${raw}`
           const startX = match.index
           links.push({
-            range: { start: { x: startX + 1, y: bufferLineNumber }, end: { x: startX + raw.length + 1, y: bufferLineNumber } },
+            range: {
+              start: { x: startX + 1, y: bufferLineNumber },
+              end: { x: startX + raw.length + 1, y: bufferLineNumber },
+            },
             text: uri,
-            activate: () => {
+            activate: (event: MouseEvent) => {
               if (this.onPreviewLink) {
-                this.onPreviewLink(uri)
+                this.onPreviewLink(uri, event.clientX, event.clientY)
               } else {
                 window.open(uri, '_blank')
               }
@@ -254,7 +298,9 @@ export class TerminalInstance {
     this._textUnsub = onTextChange((text) => {
       if (!this.xterm) return
       this.xterm.options.fontSize = text.font_size
-      this.xterm.options.fontFamily = text.font_family || getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim()
+      this.xterm.options.fontFamily =
+        text.font_family ||
+        getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim()
       this.xterm.options.lineHeight = text.line_height
       this.xterm.options.letterSpacing = text.letter_spacing
       this.xterm.options.cursorBlink = text.cursor_blink
@@ -268,16 +314,34 @@ export class TerminalInstance {
     this.xterm?.focus()
   }
 
+  blur() {
+    this.xterm?.blur()
+  }
+
   fit() {
     this._refit()
   }
 
-  sendData(data: string) {
+  sendData(data: string, force = false) {
+    // Guard: only the active pane sends input (prevents WKWebView multi-focus duplication)
+    if (!force && _activePaneId !== null && _activePaneId !== this.paneId) return
     if (this._transport) {
       this._transport.send({ type: 'input', data })
     } else if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'input', data } as ClientMsg))
     }
+  }
+
+  getSelection(): string {
+    return this.xterm?.getSelection() ?? ''
+  }
+
+  selectAll() {
+    this.xterm?.selectAll()
+  }
+
+  pasteText(text: string) {
+    this.sendData(text)
   }
 
   destroy() {
@@ -308,7 +372,11 @@ export class TerminalInstance {
       const xt = this.xterm
       this.xterm = null
       this.fitAddon = null
-      try { xt.dispose() } catch { /* already disposed or addon race */ }
+      try {
+        xt.dispose()
+      } catch {
+        /* already disposed or addon race */
+      }
     }
   }
 
@@ -343,6 +411,13 @@ export class TerminalInstance {
       this._onDataRegistered = true
       this.xterm!.onData((data) => {
         if (this._compositionGuard && !this._compositionGuard(data)) return
+        // Guard: only the active pane sends input (prevents WKWebView multi-focus duplication)
+        if (_activePaneId !== null && _activePaneId !== this.paneId) return
+        // Deduplicate: WKWebView may fire onData twice for the same keystroke
+        const now = performance.now()
+        if (data === this._lastInputData && now - this._lastInputTime < 5) return
+        this._lastInputData = data
+        this._lastInputTime = now
         this.onInput?.(data)
         this._transport?.send({ type: 'input', data })
       })
@@ -353,7 +428,9 @@ export class TerminalInstance {
 
   private _connectWS() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = wsUrlWithToken(`${proto}//${location.host}/ws?paneId=${encodeURIComponent(this.paneId)}`)
+    const url = wsUrlWithToken(
+      `${proto}//${location.host}/ws?paneId=${encodeURIComponent(this.paneId)}`
+    )
     this.ws = new WebSocket(url)
 
     this.ws.onopen = () => {
@@ -366,7 +443,11 @@ export class TerminalInstance {
     this.ws.onmessage = (e) => {
       if (this._destroyed) return
       let msg: ServerMsg
-      try { msg = JSON.parse(e.data) } catch { return }
+      try {
+        msg = JSON.parse(e.data)
+      } catch {
+        return
+      }
       if (!this.xterm) return
       if (msg.type === 'reconnected') {
         this._suppressTitleChange = true
@@ -401,6 +482,13 @@ export class TerminalInstance {
       this._onDataRegistered = true
       this.xterm!.onData((data) => {
         if (this._compositionGuard && !this._compositionGuard(data)) return
+        // Guard: only the active pane sends input (prevents WKWebView multi-focus duplication)
+        if (_activePaneId !== null && _activePaneId !== this.paneId) return
+        // Deduplicate: WKWebView may fire onData twice for the same keystroke
+        const now = performance.now()
+        if (data === this._lastInputData && now - this._lastInputTime < 5) return
+        this._lastInputData = data
+        this._lastInputTime = now
         this.onInput?.(data)
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
           this.ws.send(JSON.stringify({ type: 'input', data } as ClientMsg))
@@ -486,7 +574,11 @@ export class TerminalInstance {
     if (!this.fitAddon || !this.xterm || !this._wrapper) return
     const rect = this._wrapper.getBoundingClientRect()
     if (rect.width === 0 || rect.height === 0) return
-    try { this.fitAddon.fit() } catch { return }
+    try {
+      this.fitAddon.fit()
+    } catch {
+      return
+    }
     const cols = this.xterm.cols
     const rows = this.xterm.rows
     if (cols < 2 || rows < 2) return
@@ -494,7 +586,7 @@ export class TerminalInstance {
     const heightChanged = rows !== this._lastRows
     this._lastCols = cols
     this._lastRows = rows
-    if (heightChanged && !this._isMouseModeEnabled()) {
+    if (heightChanged && !this.isMouseModeEnabled()) {
       this.xterm.scrollToBottom()
     }
     const resizeMsg: ClientMsg = { type: 'resize', cols, rows }
@@ -508,7 +600,9 @@ export class TerminalInstance {
   private _setupDragDrop(wrapper: HTMLElement) {
     if (isTauri()) {
       lastFocusedInstance = this
-      const handler = () => { lastFocusedInstance = this }
+      const handler = () => {
+        lastFocusedInstance = this
+      }
       wrapper.addEventListener('focusin', handler)
       this._focusinCleanup = () => wrapper.removeEventListener('focusin', handler)
       setupGlobalTauriDragDrop()
@@ -550,19 +644,20 @@ export class TerminalInstance {
         uriList.split('\n').forEach((u) => {
           u = u.trim()
           if (!u || u.startsWith('#')) return
-          try { paths.push(decodeURIComponent(new URL(u).pathname)) } catch {}
+          try {
+            paths.push(decodeURIComponent(new URL(u).pathname))
+          } catch {}
         })
       }
 
       if (paths.length === 0 && types.includes('text/plain')) {
         const text = dt.getData('text/plain').trim()
         const absPlain =
-          text &&
-          (text.startsWith('/') ||
-            /^[A-Za-z]:[\\/]/.test(text) ||
-            text.startsWith('\\\\'))
+          text && (text.startsWith('/') || /^[A-Za-z]:[\\/]/.test(text) || text.startsWith('\\\\'))
         if (absPlain) {
-          text.split('\n').forEach((l) => { if (l.trim()) paths.push(l.trim()) })
+          text.split('\n').forEach((l) => {
+            if (l.trim()) paths.push(l.trim())
+          })
         }
       }
 
@@ -590,14 +685,9 @@ export class TerminalInstance {
   }
 
   private _setupTouchScroll(wrapper: HTMLElement) {
-    requestAnimationFrame(() => {
-      const screen = wrapper.querySelector('.xterm-screen') as HTMLElement
-      const viewport = wrapper.querySelector('.xterm-viewport') as HTMLElement
-      if (!screen || !viewport) return
-
+    const attachHandlers = (viewport: HTMLElement) => {
       // Prevent native browser scroll on the viewport from conflicting with our
-      // custom touch-to-wheel translation.  Without this, both the browser's
-      // overflow-y:scroll and our JS handler fire simultaneously → chaotic scroll.
+      // custom touch-to-wheel translation.
       wrapper.style.touchAction = 'none'
 
       let startX = 0
@@ -612,7 +702,10 @@ export class TerminalInstance {
       const SCROLL_THRESHOLD = 12 // Lower threshold for more responsive feel
 
       const clearMomentum = () => {
-        if (momentumId) { cancelAnimationFrame(momentumId); momentumId = 0 }
+        if (momentumId) {
+          cancelAnimationFrame(momentumId)
+          momentumId = 0
+        }
       }
 
       const onTouchStart = (e: TouchEvent) => {
@@ -627,6 +720,7 @@ export class TerminalInstance {
         mode = 'undecided'
       }
       const onTouchMove = (e: TouchEvent) => {
+        if (this.inTouchSelection) return
         const cx = e.touches[0].clientX
         const cy = e.touches[0].clientY
         const now = Date.now()
@@ -648,7 +742,7 @@ export class TerminalInstance {
           accumulatedDeltaY += deltaY
 
           if (this.xterm && Math.abs(accumulatedDeltaY) >= SCROLL_THRESHOLD) {
-            this._sendWheelEvent(screen, accumulatedDeltaY, cx, cy)
+            this._sendWheelEvent(viewport, accumulatedDeltaY, cx, cy)
             accumulatedDeltaY = 0
           }
         }
@@ -660,7 +754,7 @@ export class TerminalInstance {
         if (mode !== 'scroll') return
         // Flush remaining delta
         if (this.xterm && Math.abs(accumulatedDeltaY) > 2) {
-          this._sendWheelEvent(screen, accumulatedDeltaY, lastY, lastY)
+          this._sendWheelEvent(viewport, accumulatedDeltaY, lastY, lastY)
         }
         accumulatedDeltaY = 0
 
@@ -672,55 +766,79 @@ export class TerminalInstance {
             v *= friction
             if (Math.abs(v) < 0.05) return
             const delta = v * 16 // ~1 frame at 60fps
-            this._sendWheelEvent(screen, delta, lastY, lastY)
+            this._sendWheelEvent(viewport, delta, lastY, lastY)
             momentumId = requestAnimationFrame(step)
           }
           momentumId = requestAnimationFrame(step)
         }
       }
 
-      // passive: false so we can preventDefault() in touchmove
-      wrapper.addEventListener('touchstart', onTouchStart, { passive: true })
-      screen.addEventListener('touchmove', onTouchMove, { passive: false })
-      screen.addEventListener('touchend', onTouchEnd, { passive: true })
+      // Attach directly to the viewport (.xterm-viewport) — this intercepts
+      // touch events before iOS Safari's native scroll handler on the
+      // overflow-y:scroll element can consume them.
+      viewport.addEventListener('touchstart', onTouchStart, { passive: true })
+      viewport.addEventListener('touchmove', onTouchMove, { passive: false })
+      viewport.addEventListener('touchend', onTouchEnd, { passive: true })
       this._touchCleanup = () => {
         clearMomentum()
-        wrapper.removeEventListener('touchstart', onTouchStart)
-        screen.removeEventListener('touchmove', onTouchMove)
-        screen.removeEventListener('touchend', onTouchEnd)
+        viewport.removeEventListener('touchstart', onTouchStart)
+        viewport.removeEventListener('touchmove', onTouchMove)
+        viewport.removeEventListener('touchend', onTouchEnd)
       }
-    })
+    }
+
+    // Retry until xterm renders its DOM — single rAF is unreliable on slower
+    // devices / Safari where the renderer may need an extra frame.
+    let retries = 0
+    const tryAttach = () => {
+      requestAnimationFrame(() => {
+        const viewport = wrapper.querySelector('.xterm-viewport') as HTMLElement | null
+        if (viewport) {
+          attachHandlers(viewport)
+          return
+        }
+        if (++retries < 30) tryAttach() // ~500ms at 60fps, then give up
+      })
+    }
+    tryAttach()
   }
 
-  private _sendWheelEvent(target: HTMLElement, deltaY: number, clientX: number, clientY: number) {
+  private _sendWheelEvent(_target: HTMLElement, deltaY: number, clientX: number, clientY: number) {
     if (!this.xterm || deltaY === 0) return
 
-    if (this._isMouseModeEnabled()) {
+    if (this.isMouseModeEnabled()) {
       // App has mouse tracking active (e.g. Codex, Claude Code TUI):
       // let xterm convert the wheel event into escape sequences for the app.
       // Do NOT call scrollLines() — that shifts xterm's viewport into the main-screen
       // scrollback while the app is rendering on the alternate screen, causing a
       // garbled display when both effects are applied simultaneously.
-      target.dispatchEvent(new WheelEvent('wheel', {
-        deltaY,
-        deltaX: 0,
-        deltaZ: 0,
-        deltaMode: 0,
-        bubbles: true,
-        cancelable: true,
-        clientX,
-        clientY,
-      }))
+      // Dispatch on the xterm element so the event reaches xterm's internal listeners.
+      const xtermEl = this.xterm.element
+      if (xtermEl) {
+        xtermEl.dispatchEvent(
+          new WheelEvent('wheel', {
+            deltaY,
+            deltaX: 0,
+            deltaZ: 0,
+            deltaMode: 0,
+            bubbles: true,
+            cancelable: true,
+            clientX,
+            clientY,
+          })
+        )
+      }
     } else {
       // No mouse tracking: scroll xterm's viewport directly (normal shell / less / man).
-      const lineHeight = (this.xterm.rows && target.clientHeight)
-        ? (target.clientHeight / this.xterm.rows) : 20
+      const el = this.xterm.element
+      const lineHeight =
+        this.xterm.rows && el?.clientHeight ? el.clientHeight / this.xterm.rows : 20
       const lines = Math.round(deltaY / lineHeight)
       if (lines !== 0) this.xterm.scrollLines(lines)
     }
   }
 
-  private _isMouseModeEnabled(): boolean {
+  isMouseModeEnabled(): boolean {
     // Detects DECSET mouse tracking modes (1000/1002/1003/…) via xterm.js internal API.
     // Both paths access _core which is private — if xterm.js is upgraded and the structure
     // changes, we warn once so the breakage is visible rather than silently falling back.

@@ -36,16 +36,29 @@ export interface NetworkData {
   tx_total: number
 }
 
+export interface GpuData {
+  name: string
+  uuid: string
+  utilization_gpu: number
+  utilization_mem: number
+  temperature: number
+  power_draw: number
+  power_limit: number
+  fan_speed: number
+  memory_used: number
+  memory_total: number
+  memory_usage: number
+}
+
 export interface MonitorData {
   cpu: CpuData
   memory: MemoryData
   disk: DiskData[]
   network: NetworkData[]
+  gpu: GpuData[]
 }
 
-export type MonitorMessage =
-  | MonitorData
-  | { type: 'history'; data: MonitorData[] }
+export type MonitorMessage = MonitorData | { type: 'history'; data: MonitorData[] }
 
 export const monitorData = ref<MonitorData | null>(null)
 export const monitorConnected = ref(false)
@@ -139,8 +152,14 @@ export function startMonitor() {
 
 export function stopMonitor() {
   started = false
-  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
-  if (ws) { ws.close(1000); ws = null }
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  if (ws) {
+    ws.close(1000)
+    ws = null
+  }
   monitorConnected.value = false
 }
 
@@ -152,6 +171,8 @@ export const cpuHistory = ref<number[]>([])
 export const memHistory = ref<number[]>([])
 export const netRxHistory = ref<number[]>([])
 export const netTxHistory = ref<number[]>([])
+export const gpuUtilHistory = ref<number[][]>([])
+export const gpuMemHistory = ref<number[][]>([])
 
 let historyInitialized = false
 
@@ -167,6 +188,21 @@ function processEntry(d: MonitorData) {
   const tx = d.network.reduce((s, n) => s + n.tx_rate, 0)
   pushHistory(netRxHistory.value, rx)
   pushHistory(netTxHistory.value, tx)
+
+  // Per-GPU utilization history
+  const gpu = d.gpu ?? []
+  const utilHist = gpuUtilHistory.value
+  const memHist = gpuMemHistory.value
+  while (utilHist.length < gpu.length) {
+    utilHist.push([])
+  }
+  while (memHist.length < gpu.length) {
+    memHist.push([])
+  }
+  for (let i = 0; i < gpu.length; i++) {
+    pushHistory(utilHist[i], gpu[i].utilization_gpu)
+    pushHistory(memHist[i], gpu[i].memory_usage)
+  }
 }
 
 export function initMonitorHistory() {
@@ -179,6 +215,8 @@ export function initMonitorHistory() {
     memHistory.value = []
     netRxHistory.value = []
     netTxHistory.value = []
+    gpuUtilHistory.value = []
+    gpuMemHistory.value = []
     for (const d of history) {
       processEntry(d)
     }

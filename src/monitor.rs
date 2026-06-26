@@ -1,3 +1,9 @@
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
 use axum::{
     extract::ws::{Message, WebSocket},
     extract::{State, WebSocketUpgrade},
@@ -8,8 +14,10 @@ use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use sysinfo::{Disks, Networks, System};
+use tokio::process::Command;
 use tokio::sync::{broadcast, Mutex};
 use tokio::time::{interval, Duration};
+use tracing::{debug, warn};
 
 const MAX_HISTORY: usize = 60;
 
@@ -19,6 +27,7 @@ pub struct MonitorData {
     pub memory: MemoryData,
     pub disk: Vec<DiskData>,
     pub network: Vec<NetworkData>,
+    pub gpu: Vec<GpuData>,
 }
 
 #[derive(Serialize, Clone)]
@@ -65,6 +74,21 @@ pub struct NetworkData {
     pub tx_total: u64,
 }
 
+#[derive(Serialize, Clone)]
+pub struct GpuData {
+    pub name: String,
+    pub uuid: String,
+    pub utilization_gpu: f64,
+    pub utilization_mem: f64,
+    pub temperature: f64,
+    pub power_draw: f64,
+    pub power_limit: f64,
+    pub fan_speed: f64,
+    pub memory_used: u64,
+    pub memory_total: u64,
+    pub memory_usage: f64,
+}
+
 #[derive(Serialize)]
 struct HistoryMessage {
     r#type: &'static str,
@@ -77,13 +101,17 @@ pub struct MonitorState {
     tx: broadcast::Sender<String>,
 }
 
+impl Default for MonitorState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MonitorState {
+    #[must_use]
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel::<String>(8);
-        Self {
-            history: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_HISTORY))),
-            tx,
-        }
+        Self { history: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_HISTORY))), tx }
     }
 
     pub fn start_collector(self) {
@@ -93,6 +121,7 @@ impl MonitorState {
             let mut networks = Networks::new_with_refreshed_list();
             let mut prev_net: HashMap<String, (u64, u64)> = HashMap::new();
             let mut tick = interval(Duration::from_secs(2));
+            let mut gpu_available: Option<bool> = None;
 
             sys.refresh_cpu_all();
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -100,14 +129,28 @@ impl MonitorState {
             loop {
                 tick.tick().await;
 
-                let (data, new_net) =
-                    collect_metrics(&mut sys, &mut disks, &mut networks, &prev_net, 2.0);
+                if gpu_available.is_none() {
+                    let available = collect_gpu().await.is_some();
+                    gpu_available = Some(available);
+                    if available {
+                        debug!("GPU monitoring enabled (nvidia-smi detected)");
+                    } else {
+                        warn!("GPU monitoring disabled (nvidia-smi not available or returned no data)");
+                    }
+                }
+
+                let (data, new_net) = collect_metrics(
+                    &mut sys,
+                    &mut disks,
+                    &mut networks,
+                    &prev_net,
+                    2.0,
+                    gpu_available.unwrap_or(false),
+                )
+                .await;
                 prev_net = new_net;
 
-                let json = match serde_json::to_string(&data) {
-                    Ok(j) => j,
-                    Err(_) => continue,
-                };
+                let Ok(json) = serde_json::to_string(&data) else { continue };
 
                 {
                     let mut buf = self.history.lock().await;
@@ -123,12 +166,14 @@ impl MonitorState {
     }
 }
 
-fn collect_metrics(
+#[allow(clippy::too_many_lines)]
+async fn collect_metrics(
     sys: &mut System,
     disks: &mut Disks,
     networks: &mut Networks,
     prev_net: &HashMap<String, (u64, u64)>,
     elapsed_secs: f64,
+    gpu_available: bool,
 ) -> (MonitorData, HashMap<String, (u64, u64)>) {
     sys.refresh_cpu_all();
     sys.refresh_memory();
@@ -136,12 +181,9 @@ fn collect_metrics(
     networks.refresh(true);
 
     let cpu = {
-        let cores: Vec<f32> = sys.cpus().iter().map(|c| c.cpu_usage()).collect();
-        let avg = if cores.is_empty() {
-            0.0
-        } else {
-            cores.iter().sum::<f32>() / cores.len() as f32
-        };
+        let cores: Vec<f32> = sys.cpus().iter().map(sysinfo::Cpu::cpu_usage).collect();
+        let avg =
+            if cores.is_empty() { 0.0 } else { cores.iter().sum::<f32>() / cores.len() as f32 };
         let load = System::load_average();
         CpuData {
             usage: avg,
@@ -158,11 +200,7 @@ fn collect_metrics(
         let total = sys.total_memory();
         let used = sys.used_memory();
         let available = sys.available_memory();
-        let usage = if total > 0 {
-            used as f64 / total as f64 * 100.0
-        } else {
-            0.0
-        };
+        let usage = if total > 0 { used as f64 / total as f64 * 100.0 } else { 0.0 };
         MemoryData {
             used,
             available,
@@ -179,11 +217,7 @@ fn collect_metrics(
             let total = d.total_space();
             let available = d.available_space();
             let used = total.saturating_sub(available);
-            let usage = if total > 0 {
-                used as f64 / total as f64 * 100.0
-            } else {
-                0.0
-            };
+            let usage = if total > 0 { used as f64 / total as f64 * 100.0 } else { 0.0 };
             DiskData {
                 mount: d.mount_point().to_string_lossy().to_string(),
                 fs_type: d.file_system().to_string_lossy().to_string(),
@@ -214,30 +248,116 @@ fn collect_metrics(
             } else {
                 (0, 0)
             };
-            new_net.insert(name.to_string(), (rx_total, tx_total));
+            new_net.insert(name.clone(), (rx_total, tx_total));
 
-            Some(NetworkData {
-                name: name.to_string(),
-                ip,
-                rx_rate,
-                tx_rate,
-                rx_total,
-                tx_total,
+            Some(NetworkData { name: name.clone(), ip, rx_rate, tx_rate, rx_total, tx_total })
+        })
+        .collect();
+
+    let gpu = if gpu_available { collect_gpu().await.unwrap_or_default() } else { Vec::new() };
+
+    (MonitorData { cpu, memory, disk, network, gpu }, new_net)
+}
+
+fn parse_f64(s: &str) -> f64 {
+    let s = s.trim();
+    if s.starts_with('[') || s == "N/A" || s == "[N/A]" {
+        return 0.0;
+    }
+    s.trim_end_matches('%')
+        .trim_end_matches('W')
+        .trim_end_matches('C')
+        .trim()
+        .parse()
+        .unwrap_or(0.0)
+}
+
+fn parse_memory(s: &str) -> u64 {
+    let s = s.trim();
+    if s.starts_with('[') || s == "N/A" || s == "[N/A]" {
+        return 0;
+    }
+    // Handle MiB, GiB, MB, GB suffixes
+    if let Some(val) = s.strip_suffix("MiB") {
+        return val.trim().parse::<f64>().unwrap_or(0.0) as u64;
+    }
+    if let Some(val) = s.strip_suffix("GiB") {
+        return (val.trim().parse::<f64>().unwrap_or(0.0) * 1024.0) as u64;
+    }
+    if let Some(val) = s.strip_suffix("MB") {
+        return (val.trim().parse::<f64>().unwrap_or(0.0) * 1000.0 / 1024.0) as u64;
+    }
+    if let Some(val) = s.strip_suffix("GB") {
+        return (val.trim().parse::<f64>().unwrap_or(0.0) * 1000.0) as u64;
+    }
+    s.parse::<f64>().unwrap_or(0.0) as u64
+}
+
+async fn collect_gpu() -> Option<Vec<GpuData>> {
+    let output = match Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,uuid,utilization.gpu,utilization.memory,temperature.gpu,power.draw,power.limit,fan.speed,memory.used,memory.total",
+            "--format=csv,noheader",
+        ])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            warn!("Failed to spawn nvidia-smi: {e}");
+            return None;
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!("nvidia-smi exited with {}: {}", output.status, stderr.trim());
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let gpus: Vec<GpuData> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(',').collect();
+            if fields.len() < 10 {
+                warn!("nvidia-smi: expected >=10 fields, got {} in: {}", fields.len(), line.trim());
+                return None;
+            }
+            let memory_used = parse_memory(fields[8]);
+            let memory_total = parse_memory(fields[9]);
+            let memory_usage = if memory_total > 0 {
+                memory_used as f64 / memory_total as f64 * 100.0
+            } else {
+                0.0
+            };
+            Some(GpuData {
+                name: fields[0].trim().to_string(),
+                uuid: fields[1].trim().to_string(),
+                utilization_gpu: parse_f64(fields[2]),
+                utilization_mem: parse_f64(fields[3]),
+                temperature: parse_f64(fields[4]),
+                power_draw: parse_f64(fields[5]),
+                power_limit: parse_f64(fields[6]),
+                fan_speed: parse_f64(fields[7]),
+                memory_used,
+                memory_total,
+                memory_usage,
             })
         })
         .collect();
 
-    (
-        MonitorData {
-            cpu,
-            memory,
-            disk,
-            network,
-        },
-        new_net,
-    )
+    if gpus.is_empty() {
+        warn!("nvidia-smi returned no valid GPU data. Raw output: {}", stdout.trim());
+        None
+    } else {
+        debug!("Collected {} GPU(s)", gpus.len());
+        Some(gpus)
+    }
 }
 
+#[allow(clippy::unused_async)]
 pub async fn ws_monitor_handler(
     State(state): State<MonitorState>,
     ws: WebSocketUpgrade,
@@ -252,12 +372,9 @@ async fn handle_monitor_socket(socket: WebSocket, state: MonitorState) {
     {
         let buf = state.history.lock().await;
         if !buf.is_empty() {
-            let msg = HistoryMessage {
-                r#type: "history",
-                data: buf.iter().cloned().collect(),
-            };
+            let msg = HistoryMessage { r#type: "history", data: buf.iter().cloned().collect() };
             if let Ok(json) = serde_json::to_string(&msg) {
-                if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                if ws_tx.send(Message::Text(json)).await.is_err() {
                     return;
                 }
             }
@@ -270,11 +387,11 @@ async fn handle_monitor_socket(socket: WebSocket, state: MonitorState) {
         loop {
             match rx.recv().await {
                 Ok(json) => {
-                    if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                    if ws_tx.send(Message::Text(json)).await.is_err() {
                         break;
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(_) => break,
             }
         }

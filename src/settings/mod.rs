@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use axum::{
     body::Body,
     extract::State,
@@ -7,10 +8,7 @@ use axum::{
 };
 use axum_extra::extract::Multipart;
 use serde::{Deserialize, Serialize};
-use std::{
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
@@ -27,11 +25,21 @@ pub struct Settings {
     #[serde(default)]
     pub bookmarks: Vec<CommandBookmark>,
     #[serde(default)]
+    pub workspace_bookmarks: Vec<WorkspaceBookmark>,
+    #[serde(default)]
+    pub web_bookmarks: Vec<WebBookmark>,
+    #[serde(default)]
+    pub recent_files: Vec<RecentEntry>,
+    #[serde(default)]
+    pub recent_urls: Vec<RecentEntry>,
+    #[serde(default)]
     pub action_keyboard: Option<ActionKeyboardConfig>,
     #[serde(default)]
     pub keyboard_sound: bool,
     #[serde(default)]
     pub show_virtual_keyboard: bool,
+    #[serde(default = "default_true")]
+    pub confirm_before_close_tab: bool,
     #[serde(default = "default_locale")]
     pub locale: String,
     #[serde(default)]
@@ -46,6 +54,15 @@ pub struct Settings {
     pub auth_token: String,
     #[serde(default = "default_ip_whitelist")]
     pub ip_whitelist: Vec<String>,
+    #[serde(default)]
+    pub keybindings: std::collections::HashMap<String, KeyBinding>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct KeyBinding {
+    pub key: String,
+    #[serde(default)]
+    pub shift: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -97,7 +114,9 @@ pub struct BellNotificationConfig {
     pub debounce_ms: u32,
 }
 
-fn default_debounce_ms() -> u32 { 300 }
+fn default_debounce_ms() -> u32 {
+    300
+}
 
 impl Default for BellNotificationConfig {
     fn default() -> Self {
@@ -113,7 +132,9 @@ pub struct CommandCompleteConfig {
     pub threshold_seconds: u32,
 }
 
-fn default_threshold_seconds() -> u32 { 10 }
+fn default_threshold_seconds() -> u32 {
+    10
+}
 
 impl Default for CommandCompleteConfig {
     fn default() -> Self {
@@ -130,6 +151,7 @@ pub struct KeywordRule {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct NotificationChannels {
     #[serde(default = "default_true")]
     pub sound: bool,
@@ -173,11 +195,21 @@ impl Default for NotificationSounds {
     }
 }
 
-fn default_info_sound() -> SoundConfig { SoundConfig { source: "builtin".into(), value: "ding".into(), volume: 0.7 } }
-fn default_success_sound() -> SoundConfig { SoundConfig { source: "builtin".into(), value: "chime-up".into(), volume: 0.7 } }
-fn default_warning_sound() -> SoundConfig { SoundConfig { source: "builtin".into(), value: "double-beep".into(), volume: 0.8 } }
-fn default_error_sound() -> SoundConfig { SoundConfig { source: "builtin".into(), value: "error-buzz".into(), volume: 0.8 } }
-fn default_urgent_sound() -> SoundConfig { SoundConfig { source: "builtin".into(), value: "alarm".into(), volume: 1.0 } }
+fn default_info_sound() -> SoundConfig {
+    SoundConfig { source: "builtin".into(), value: "ding".into(), volume: 0.7 }
+}
+fn default_success_sound() -> SoundConfig {
+    SoundConfig { source: "builtin".into(), value: "chime-up".into(), volume: 0.7 }
+}
+fn default_warning_sound() -> SoundConfig {
+    SoundConfig { source: "builtin".into(), value: "double-beep".into(), volume: 0.8 }
+}
+fn default_error_sound() -> SoundConfig {
+    SoundConfig { source: "builtin".into(), value: "error-buzz".into(), volume: 0.8 }
+}
+fn default_urgent_sound() -> SoundConfig {
+    SoundConfig { source: "builtin".into(), value: "alarm".into(), volume: 1.0 }
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SoundConfig {
@@ -189,8 +221,12 @@ pub struct SoundConfig {
     pub volume: f32,
 }
 
-fn default_source() -> String { "builtin".into() }
-fn default_volume() -> f32 { 0.7 }
+fn default_source() -> String {
+    "builtin".into()
+}
+fn default_volume() -> f32 {
+    0.7
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -211,6 +247,7 @@ pub struct NotificationHook {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct MonitorConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -222,11 +259,13 @@ pub struct MonitorConfig {
     pub disk: bool,
     #[serde(default = "default_true")]
     pub network: bool,
+    #[serde(default = "default_true")]
+    pub gpu: bool,
 }
 
 impl Default for MonitorConfig {
     fn default() -> Self {
-        Self { enabled: true, cpu: true, memory: true, disk: true, network: true }
+        Self { enabled: true, cpu: true, memory: true, disk: true, network: true, gpu: true }
     }
 }
 
@@ -257,7 +296,9 @@ pub struct ThemeConfig {
     pub custom: Option<CustomColors>,
 }
 
-fn default_preset() -> String { "dark".into() }
+fn default_preset() -> String {
+    "dark".into()
+}
 
 impl Default for ThemeConfig {
     fn default() -> Self {
@@ -303,11 +344,21 @@ pub struct TextConfig {
     pub scrollback: u32,
 }
 
-fn default_font_size() -> u8 { 14 }
-fn default_line_height() -> f32 { 1.2 }
-fn default_cursor_style() -> String { "block".into() }
-fn default_true() -> bool { true }
-fn default_scrollback() -> u32 { 10000 }
+fn default_font_size() -> u8 {
+    14
+}
+fn default_line_height() -> f32 {
+    1.2
+}
+fn default_cursor_style() -> String {
+    "block".into()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_scrollback() -> u32 {
+    10000
+}
 
 impl Default for TextConfig {
     fn default() -> Self {
@@ -323,8 +374,12 @@ impl Default for TextConfig {
     }
 }
 
-fn default_mode() -> String { "solid".into() }
-fn default_opacity() -> f32 { 1.0 }
+fn default_mode() -> String {
+    "solid".into()
+}
+fn default_opacity() -> f32 {
+    1.0
+}
 
 impl Default for BackgroundConfig {
     fn default() -> Self {
@@ -339,6 +394,32 @@ pub struct CommandBookmark {
     pub command: String,
     #[serde(default)]
     pub group: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct WorkspaceBookmark {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    #[serde(default)]
+    pub group: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct WebBookmark {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    #[serde(default)]
+    pub group: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RecentEntry {
+    pub path_or_url: String,
+    pub name: String,
+    pub visited_at: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -369,9 +450,14 @@ impl Default for Settings {
             background: BackgroundConfig::default(),
             text: TextConfig::default(),
             bookmarks: vec![],
+            workspace_bookmarks: vec![],
+            web_bookmarks: vec![],
+            recent_files: vec![],
+            recent_urls: vec![],
             action_keyboard: None,
             keyboard_sound: false,
             show_virtual_keyboard: false,
+            confirm_before_close_tab: true,
             locale: default_locale(),
             panel_position: PanelPosition::default(),
             monitor: MonitorConfig::default(),
@@ -379,14 +465,14 @@ impl Default for Settings {
             open_api: OpenApiConfig::default(),
             auth_token: String::new(),
             ip_whitelist: default_ip_whitelist(),
+            keybindings: std::collections::HashMap::new(),
         }
     }
 }
 
-fn config_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("dinotty")
+#[must_use]
+pub fn config_dir() -> PathBuf {
+    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("dinotty")
 }
 
 fn settings_path() -> PathBuf {
@@ -397,10 +483,16 @@ fn token_path() -> PathBuf {
     config_dir().join("token")
 }
 
+#[must_use]
 pub fn load_token() -> Option<String> {
-    std::fs::read_to_string(token_path()).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    std::fs::read_to_string(token_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
+/// # Errors
+/// Returns `Err` if the config directory cannot be created or the file cannot be written.
 pub fn save_token(token: &str) -> Result<(), String> {
     let dir = config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -433,12 +525,15 @@ fn save_settings(settings: &Settings) -> Result<(), String> {
     Ok(())
 }
 
+/// # Errors
+/// Returns `Err` if the config directory cannot be created or the file cannot be written.
 pub fn save_settings_sync(settings: &Settings) -> Result<(), String> {
     save_settings(settings)
 }
 
 pub type SettingsState = Arc<RwLock<Settings>>;
 
+#[must_use]
 pub fn create_settings_state() -> SettingsState {
     Arc::new(RwLock::new(load_settings()))
 }
@@ -517,6 +612,9 @@ pub async fn upload_background(
     StatusCode::BAD_REQUEST
 }
 
+/// # Panics
+/// Panics if the response builder fails (which should not happen with valid status codes and bodies).
+#[allow(clippy::unused_async)]
 pub async fn get_background() -> impl IntoResponse {
     let path = bg_image_path();
     if !path.exists() {
@@ -526,18 +624,17 @@ pub async fn get_background() -> impl IntoResponse {
             .unwrap();
     }
     match std::fs::read(&path) {
-        Ok(data) => {
-            Response::builder()
-                .header(header::CONTENT_TYPE, "image/webp")
-                .header(header::CACHE_CONTROL, "no-cache")
-                .body(Body::from(data))
-                .unwrap()
-        }
-        Err(_) => {
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from("read error"))
-                .unwrap()
-        }
+        Ok(data) => Response::builder()
+            .header(header::CONTENT_TYPE, "image/webp")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .body(Body::from(data))
+            .unwrap(),
+        Err(_) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from("read error"))
+            .unwrap(),
     }
 }
+
+#[cfg(test)]
+mod tests;

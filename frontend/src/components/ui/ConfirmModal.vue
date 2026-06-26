@@ -8,7 +8,6 @@
         </div>
         <div class="confirm-body">
           <p class="confirm-message">{{ message }}</p>
-          <p v-if="target" class="confirm-target">{{ target }}</p>
         </div>
         <div class="confirm-footer">
           <button class="confirm-btn cancel" @click="onCancel">{{ cancelText }}</button>
@@ -20,11 +19,12 @@
 </template>
 
 <script setup lang="ts">
-defineProps<{
+import { onMounted, onUnmounted } from 'vue'
+
+const props = defineProps<{
   visible: boolean
   title: string
   message: string
-  target?: string
   confirmText: string
   cancelText: string
 }>()
@@ -41,6 +41,16 @@ function onConfirm() {
 function onCancel() {
   emit('cancel')
 }
+
+function onKey(e: KeyboardEvent) {
+  if (e.key === 'Escape' && props.visible) {
+    e.preventDefault()
+    onCancel()
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', onKey, true))
+onUnmounted(() => window.removeEventListener('keydown', onKey, true))
 </script>
 
 <style scoped>
@@ -104,17 +114,6 @@ function onCancel() {
   line-height: 1.5;
 }
 
-.confirm-target {
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--accent);
-  word-break: break-all;
-  font-family: var(--font-mono);
-  background: var(--bg-input);
-  padding: 6px 8px;
-  border-radius: 4px;
-}
-
 .confirm-footer {
   display: flex;
   justify-content: flex-end;
@@ -130,7 +129,9 @@ function onCancel() {
   border: none;
   color: var(--fg-muted);
   background: none;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 
 .confirm-btn.cancel {
@@ -139,7 +140,7 @@ function onCancel() {
 }
 
 .confirm-btn.cancel:hover {
-  background: rgba(255,255,255,0.06);
+  background: rgba(255, 255, 255, 0.06);
   color: var(--fg);
 }
 
@@ -149,7 +150,7 @@ function onCancel() {
 }
 
 .confirm-btn.primary:hover {
-  background: rgba(239,68,68,0.08);
+  background: rgba(239, 68, 68, 0.08);
   color: var(--color-red, #ef4444);
 }
 </style>

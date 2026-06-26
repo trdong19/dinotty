@@ -4,16 +4,28 @@
       <button
         class="plugin-tab"
         :class="{ active: tab === 'market' }"
-        @click="tab = 'market'; detailPlugin = null"
-      >{{ t('settings.plugins.market') }}</button>
+        @click="
+          tab = 'market';
+          detailPlugin = null;
+        "
+      >
+        {{ t('settings.plugins.market') }}
+      </button>
       <button
         class="plugin-tab"
         :class="{ active: tab === 'installed' }"
-        @click="tab = 'installed'; detailPlugin = null"
-      >{{ t('settings.plugins.installed') }} ({{ settingsPlugins.length }})</button>
+        @click="
+          tab = 'installed';
+          detailPlugin = null;
+        "
+      >
+        {{ t('settings.plugins.installed') }} ({{ settingsPlugins.length }})
+      </button>
     </div>
 
-    <div v-if="statusMsg" :class="statusOk ? 'plugin-success-msg' : 'plugin-error-msg'">{{ statusMsg }}</div>
+    <div v-if="statusMsg" :class="statusOk ? 'plugin-success-msg' : 'plugin-error-msg'">
+      {{ statusMsg }}
+    </div>
 
     <!-- Market Tab -->
     <div v-show="tab === 'market' && !detailPlugin">
@@ -22,7 +34,9 @@
       </div>
       <div v-else-if="marketError" class="plugin-error-msg">
         {{ t('settings.plugins.fetchError') }}: {{ marketError }}
-        <button class="plugin-retry-btn" @click="fetchMarket()">{{ t('settings.plugins.retry') }}</button>
+        <button class="plugin-retry-btn" @click="fetchMarket()">
+          {{ t('settings.plugins.retry') }}
+        </button>
       </div>
       <div v-else-if="marketPlugins.length === 0" class="plugin-empty">
         {{ t('settings.plugins.noPlugins') }}
@@ -43,13 +57,25 @@
             {{ t('settings.plugins.hasUpdate') }}
           </span>
         </div>
-        <p class="plugin-card-desc">{{ locale === 'zh' && mp.description_zh ? mp.description_zh : mp.description }}</p>
+        <p class="plugin-card-desc">
+          {{ locale === 'zh' && mp.description_zh ? mp.description_zh : mp.description }}
+        </p>
         <div class="plugin-card-actions">
-          <button v-if="!mp.installed_version" class="plugin-install-btn" @click.stop="onMarketInstall(mp)" :disabled="isBusy(mp.id)">
+          <button
+            v-if="!mp.installed_version"
+            class="plugin-install-btn"
+            @click.stop="onMarketInstall(mp)"
+            :disabled="isBusy(mp.id)"
+          >
             <span v-if="isBusy(mp.id)" class="plugin-spinner"></span>
             {{ t('settings.plugins.installFromMarket') }}
           </button>
-          <button v-else-if="mp.has_update" class="plugin-install-btn" @click.stop="onMarketInstall(mp)" :disabled="isBusy(mp.id)">
+          <button
+            v-else-if="mp.has_update"
+            class="plugin-install-btn"
+            @click.stop="onMarketInstall(mp)"
+            :disabled="isBusy(mp.id)"
+          >
             <span v-if="isBusy(mp.id)" class="plugin-spinner"></span>
             {{ t('settings.plugins.updateFromMarket') }}
           </button>
@@ -69,25 +95,59 @@
         <div class="plugin-detail-title-row">
           <span class="plugin-detail-name">{{ detailPlugin.name }}</span>
           <span class="plugin-card-version">v{{ detailPlugin.version }}</span>
-          <span v-if="detailPlugin.installed_version && !detailPlugin.has_update" class="plugin-badge installed">
+          <span
+            v-if="detailPlugin.installed_version && !detailPlugin.has_update"
+            class="plugin-badge installed"
+          >
             {{ t('settings.plugins.installedBadge') }}
           </span>
           <span v-if="detailPlugin.has_update" class="plugin-badge update">
             {{ t('settings.plugins.hasUpdate') }}
           </span>
         </div>
-        <p v-if="detailPlugin.author" class="plugin-detail-author">{{ t('settings.plugins.author') }}: {{ detailPlugin.author }}</p>
-        <p class="plugin-detail-desc">{{ locale === 'zh' && detailPlugin.description_zh ? detailPlugin.description_zh : detailPlugin.description }}</p>
+        <p v-if="detailPlugin.author" class="plugin-detail-author">
+          {{ t('settings.plugins.author') }}: {{ detailPlugin.author }}
+        </p>
+        <p class="plugin-detail-desc">
+          {{
+            locale === 'zh' && detailPlugin.description_zh
+              ? detailPlugin.description_zh
+              : detailPlugin.description
+          }}
+        </p>
         <div class="plugin-detail-actions">
-          <button v-if="!detailPlugin.installed_version" class="plugin-install-btn" @click="onMarketInstall(detailPlugin)" :disabled="isBusy(detailPlugin.id)">
+          <button
+            v-if="!detailPlugin.installed_version"
+            class="plugin-install-btn"
+            @click="onMarketInstall(detailPlugin)"
+            :disabled="isBusy(detailPlugin.id)"
+          >
             <span v-if="isBusy(detailPlugin.id)" class="plugin-spinner"></span>
             {{ t('settings.plugins.installFromMarket') }}
           </button>
-          <button v-else-if="detailPlugin.has_update" class="plugin-install-btn" @click="onMarketInstall(detailPlugin)" :disabled="isBusy(detailPlugin.id)">
+          <button
+            v-else-if="detailPlugin.has_update"
+            class="plugin-install-btn"
+            @click="onMarketInstall(detailPlugin)"
+            :disabled="isBusy(detailPlugin.id)"
+          >
             <span v-if="isBusy(detailPlugin.id)" class="plugin-spinner"></span>
             {{ t('settings.plugins.updateFromMarket') }}
           </button>
-          <a v-if="detailPlugin.homepage" :href="detailPlugin.homepage" target="_blank" class="plugin-link">
+          <button
+            v-if="detailPlugin.installed_version"
+            class="plugin-action-btn plugin-danger"
+            @click="onUninstall(detailPlugin.id)"
+            :disabled="isBusy(detailPlugin.id)"
+          >
+            {{ t('settings.plugins.uninstall') }}
+          </button>
+          <a
+            v-if="detailPlugin.homepage"
+            :href="detailPlugin.homepage"
+            target="_blank"
+            class="plugin-link"
+          >
             {{ t('settings.plugins.viewOnGithub') }}
           </a>
         </div>
@@ -97,7 +157,11 @@
         <div v-if="readmeLoadingState" class="plugin-readme-loading">
           <span class="plugin-spinner"></span> {{ t('settings.plugins.loading') }}
         </div>
-        <div v-else-if="readmeHtmlContent" class="plugin-readme-body" v-html="readmeHtmlContent"></div>
+        <div
+          v-else-if="readmeHtmlContent"
+          class="plugin-readme-body"
+          v-html="readmeHtmlContent"
+        ></div>
         <div v-else class="plugin-readme-empty">{{ t('settings.plugins.noReadme') }}</div>
       </div>
     </div>
@@ -105,23 +169,35 @@
     <!-- Installed Tab -->
     <div v-show="tab === 'installed'">
       <div class="plugin-toolbar">
-        <label class="plugin-action-btn" :class="{ disabled: isBusy('file-install') }">
-          <input type="file" accept=".tar.gz,.tgz" hidden @change="onInstallFile" :disabled="isBusy('file-install')" />
-          <span v-if="isBusy('file-install')" class="plugin-spinner"></span>
-          <span>{{ t('settings.plugins.installFile') }}</span>
+        <button
+          class="plugin-action-btn"
+          @click="showDirInstall = !showDirInstall"
+          :disabled="isBusy('dir-install')"
+        >
+          <span v-if="isBusy('dir-install')" class="plugin-spinner"></span>
+          {{ t('settings.plugins.installFolder') }}
+        </button>
+        <button class="plugin-action-btn" @click="onRefresh" :disabled="isBusy('refresh')">
+          <span v-if="isBusy('refresh')" class="plugin-spinner"></span>
+          {{ t('settings.plugins.refresh') }}
+        </button>
+      </div>
+      <div v-if="showDirInstall" class="plugin-dir-install">
+        <button class="plugin-browse-btn" @click="showPicker = true">
+          {{ installDirPath || t('settings.plugins.browseFolder') }}
+        </button>
+        <label class="plugin-dev-toggle" :title="t('settings.plugins.devLinkHint')">
+          <input type="checkbox" v-model="devLinkMode" />
+          <span>{{ t('settings.plugins.devLinkCheckbox') }}</span>
         </label>
-        <div class="plugin-toolbar-right">
-          <input
-            v-model="devPath"
-            class="shortcut-input"
-            style="width: 200px"
-            placeholder="/path/to/my-plugin"
-          />
-          <button class="plugin-action-btn" @click="onDevLink" :disabled="!devPath.trim() || isBusy('dev-link')">
-            <span v-if="isBusy('dev-link')" class="plugin-spinner"></span>
-            {{ t('settings.plugins.devLink') }}
-          </button>
-        </div>
+        <button
+          class="plugin-action-btn"
+          @click="onInstallFromDir"
+          :disabled="!installDirPath.trim() || isBusy('dir-install')"
+        >
+          <span v-if="isBusy('dir-install')" class="plugin-spinner"></span>
+          {{ t('settings.plugins.install') }}
+        </button>
       </div>
 
       <div v-if="settingsPlugins.length === 0" class="plugin-empty">
@@ -130,6 +206,9 @@
       <div v-for="p in settingsPlugins" :key="p.id" class="plugin-card">
         <div class="plugin-card-header">
           <span class="plugin-card-name">{{ p.name }}</span>
+          <span v-if="p.isDevLink" class="plugin-badge dev">{{
+            t('settings.plugins.devBadge')
+          }}</span>
           <span v-if="p.state === 'error'" class="plugin-badge error">error</span>
           <span class="plugin-card-version">v{{ p.version }}</span>
         </div>
@@ -145,16 +224,34 @@
             {{ t('settings.plugins.updateFromMarket') }}
           </button>
           <label v-else class="plugin-action-btn" :class="{ disabled: isBusy(`update:${p.id}`) }">
-            <input type="file" accept=".tar.gz,.tgz" hidden @change="onUpdateFile($event, p.id)" :disabled="isBusy(`update:${p.id}`)" />
+            <input
+              type="file"
+              accept=".tar.gz,.tgz"
+              hidden
+              @change="onUpdateFile($event, p.id)"
+              :disabled="isBusy(`update:${p.id}`)"
+            />
             <span v-if="isBusy(`update:${p.id}`)" class="plugin-spinner"></span>
             <span>{{ t('settings.plugins.update') }}</span>
           </label>
-          <button class="plugin-action-btn plugin-danger" @click="onUninstall(p.id)" :disabled="isBusy(p.id)">
+          <button
+            class="plugin-action-btn plugin-danger"
+            @click="onUninstall(p.id)"
+            :disabled="isBusy(p.id)"
+          >
             {{ t('settings.plugins.uninstall') }}
           </button>
         </div>
       </div>
     </div>
+
+    <FilePickerModal
+      :visible="showPicker"
+      pane-id=""
+      root="~"
+      @update:visible="showPicker = $event"
+      @select="onPickerSelect"
+    />
 
     <ConfirmModal
       :visible="!!confirmUninstall"
@@ -170,23 +267,35 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useI18n } from '../../composables/useI18n'
 import { authFetch, apiUrl } from '../../composables/apiBase'
 import { usePluginLoader } from '../../composables/usePluginLoader'
 import { useMarketplace, type MarketPlugin } from '../../composables/useMarketplace'
 import ConfirmModal from '../ui/ConfirmModal.vue'
+import FilePickerModal from '../preview/FilePickerModal.vue'
 
 const { t, locale } = useI18n()
 const { loadedPlugins, loadAll, unloadPlugin } = usePluginLoader()
-const { plugins: marketPlugins, loading: marketLoading, error: marketError, installing, fetchMarket, fetchReadme, installFromMarket } = useMarketplace()
+const {
+  plugins: marketPlugins,
+  loading: marketLoading,
+  error: marketError,
+  installing,
+  fetchMarket,
+  fetchReadme,
+  installFromMarket,
+} = useMarketplace()
 
 const tab = ref<'market' | 'installed'>('market')
 const statusMsg = ref('')
 const statusOk = ref(false)
-const devPath = ref('')
+const devLinkMode = ref(false)
+const showDirInstall = ref(false)
+const installDirPath = ref('')
 const busyOps = ref<Set<string>>(new Set())
 const confirmUninstall = ref<string | null>(null)
+const showPicker = ref(false)
 
 // Detail view state
 const detailPlugin = ref<MarketPlugin | null>(null)
@@ -200,20 +309,23 @@ const readmeHtmlContent = computed(() => {
 })
 
 const settingsPlugins = computed(() =>
-  Array.from(loadedPlugins.values()).map(p => ({
+  Array.from(loadedPlugins.values()).map((p) => ({
     id: p.id,
     name: p.manifest.name,
     version: p.manifest.version,
     description: p.manifest.description,
     state: p.state,
-    marketEntry: marketPlugins.value.find(mp => mp.id === p.id),
-  })),
+    isDevLink: p.isDevLink,
+    marketEntry: marketPlugins.value.find((mp) => mp.id === p.id),
+  }))
 )
 
 function setStatus(msg: string, ok: boolean) {
   statusMsg.value = msg
   statusOk.value = ok
-  setTimeout(() => { statusMsg.value = '' }, 4000)
+  setTimeout(() => {
+    statusMsg.value = ''
+  }, 4000)
 }
 
 function isBusy(key: string) {
@@ -228,7 +340,20 @@ function unmarkBusy(key: string) {
   busyOps.value = next
 }
 
-onMounted(() => fetchMarket())
+watch(
+  tab,
+  (val) => {
+    if (
+      val === 'market' &&
+      marketPlugins.value.length === 0 &&
+      !marketLoading.value &&
+      !marketError.value
+    ) {
+      fetchMarket()
+    }
+  },
+  { immediate: true }
+)
 
 async function renderMarkdown(src: string): Promise<string> {
   const [m, dp] = await Promise.all([import('marked'), import('dompurify')])
@@ -262,7 +387,7 @@ async function onMarketInstall(mp: MarketPlugin) {
     await fetchMarket()
     // Update detail plugin data only if already in detail view
     if (detailPlugin.value?.id === mp.id) {
-      const updated = marketPlugins.value.find(p => p.id === mp.id)
+      const updated = marketPlugins.value.find((p) => p.id === mp.id)
       if (updated) detailPlugin.value = updated
     }
   } else {
@@ -282,18 +407,26 @@ async function onUpdateFromRepo(mp: MarketPlugin) {
   }
 }
 
-async function onInstallFile(e: Event) {
-  const input = e.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file) return
-  markBusy('file-install')
+function onPickerSelect(path: string) {
+  installDirPath.value = path
+}
+
+async function onInstallFromDir() {
+  const path = installDirPath.value.trim()
+  if (!path) return
+  markBusy('dir-install')
   try {
-    const form = new FormData()
-    form.append('file', file)
-    const res = await authFetch(apiUrl('/api/plugins/install'), { method: 'POST', body: form })
+    const res = await authFetch(apiUrl('/api/plugins/install-dir'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, dev_link: devLinkMode.value }),
+    })
     if (res.ok) {
       const manifest = await res.json()
-      setStatus(`Installed ${manifest.name} v${manifest.version}`, true)
+      const mode = devLinkMode.value ? 'Linked' : 'Installed'
+      setStatus(`${mode} ${manifest.name} v${manifest.version}`, true)
+      installDirPath.value = ''
+      showDirInstall.value = false
       await loadAll()
       await fetchMarket()
     } else {
@@ -301,8 +434,7 @@ async function onInstallFile(e: Event) {
       setStatus(err.error || 'Install failed', false)
     }
   } finally {
-    unmarkBusy('file-install')
-    input.value = ''
+    unmarkBusy('dir-install')
   }
 }
 
@@ -343,31 +475,22 @@ async function doUninstall() {
   if (res.ok) {
     setStatus(`Uninstalled ${id}`, true)
     await fetchMarket()
+    if (detailPlugin.value?.id === id) {
+      const updated = marketPlugins.value.find((p) => p.id === id)
+      if (updated) detailPlugin.value = updated
+    }
   }
 }
 
-async function onDevLink() {
-  const path = devPath.value.trim()
-  if (!path) return
-  markBusy('dev-link')
+async function onRefresh() {
+  markBusy('refresh')
   try {
-    const res = await authFetch(apiUrl('/api/plugins/dev-link'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path }),
-    })
-    if (res.ok) {
-      const manifest = await res.json()
-      setStatus(`Linked ${manifest.name} from ${path}`, true)
-      devPath.value = ''
-      await loadAll()
-      await fetchMarket()
-    } else {
-      const err = await res.json().catch(() => ({ error: 'Dev-link failed' }))
-      setStatus(err.error || 'Dev-link failed', false)
-    }
+    await Promise.all([loadAll(), fetchMarket()])
+    setStatus(t('settings.plugins.refresh') + ' ✓', true)
+  } catch {
+    setStatus('Refresh failed', false)
   } finally {
-    unmarkBusy('dev-link')
+    unmarkBusy('refresh')
   }
 }
 </script>
@@ -388,7 +511,9 @@ async function onDevLink() {
   border: none;
   border-bottom: 2px solid transparent;
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
 }
 .plugin-tab:hover {
   color: var(--text-primary, #ddd);
@@ -409,6 +534,47 @@ async function onDevLink() {
   gap: 8px;
   margin-left: auto;
 }
+.plugin-dir-install {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 12px;
+}
+.plugin-browse-btn {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--fg-muted, #858585);
+  background: var(--bg-input, #2a2a2c);
+  border: 1px solid var(--border, #444);
+  border-radius: 5px;
+  cursor: pointer;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
+}
+.plugin-browse-btn:hover {
+  color: var(--fg, #cccccc);
+  border-color: var(--fg-muted, #858585);
+}
+.plugin-dev-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-muted, #888);
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+.plugin-dev-toggle input[type='checkbox'] {
+  accent-color: var(--accent, #8a8a8a);
+}
 .plugin-install-btn {
   display: inline-flex;
   align-items: center;
@@ -423,7 +589,7 @@ async function onDevLink() {
   transition: background 0.15s;
 }
 .plugin-install-btn:hover {
-  background: rgba(255,255,255,0.06);
+  background: rgba(255, 255, 255, 0.06);
 }
 .plugin-action-btn {
   display: inline-flex;
@@ -435,10 +601,12 @@ async function onDevLink() {
   font-size: 12px;
   cursor: pointer;
   border: none;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 .plugin-action-btn:hover {
-  background: rgba(255,255,255,0.06);
+  background: rgba(255, 255, 255, 0.06);
   color: var(--fg, #cccccc);
 }
 .plugin-danger {
@@ -446,7 +614,7 @@ async function onDevLink() {
 }
 .plugin-danger:hover {
   color: var(--color-red, #ef4444);
-  background: rgba(239,68,68,0.08);
+  background: rgba(239, 68, 68, 0.08);
 }
 .plugin-error-msg {
   margin: 8px 0;
@@ -462,7 +630,9 @@ async function onDevLink() {
   border: 1px solid var(--border, #444);
   border-radius: 4px;
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
 }
 .plugin-retry-btn:hover {
   color: var(--fg-bright, #d0d0d0);
@@ -487,7 +657,9 @@ async function onDevLink() {
 }
 .plugin-card-clickable {
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
 }
 .plugin-card-clickable:hover {
   border-color: var(--fg-muted, #858585);
@@ -528,6 +700,10 @@ async function onDevLink() {
   color: var(--color-red, #ef4444);
   background: rgba(239, 68, 68, 0.15);
 }
+.plugin-badge.dev {
+  color: var(--color-orange, #f59e0b);
+  background: rgba(245, 158, 11, 0.15);
+}
 .plugin-card-desc {
   margin: 6px 0 10px;
   font-size: 12px;
@@ -565,7 +741,9 @@ async function onDevLink() {
   border-top-color: transparent;
 }
 @keyframes plugin-spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 .plugin-action-btn.disabled {
   opacity: 0.5;
@@ -662,9 +840,15 @@ async function onDevLink() {
   margin: 16px 0 8px;
   font-weight: 600;
 }
-.plugin-readme-body :deep(h1) { font-size: 18px; }
-.plugin-readme-body :deep(h2) { font-size: 16px; }
-.plugin-readme-body :deep(h3) { font-size: 14px; }
+.plugin-readme-body :deep(h1) {
+  font-size: 18px;
+}
+.plugin-readme-body :deep(h2) {
+  font-size: 16px;
+}
+.plugin-readme-body :deep(h3) {
+  font-size: 14px;
+}
 .plugin-readme-body :deep(p) {
   margin: 8px 0;
 }
@@ -697,7 +881,7 @@ async function onDevLink() {
   margin: 8px 0;
 }
 .plugin-readme-body :deep(a) {
-  color: var(--accent, #8A8A8A);
+  color: var(--accent, #8a8a8a);
   text-decoration: none;
 }
 .plugin-readme-body :deep(a:hover) {

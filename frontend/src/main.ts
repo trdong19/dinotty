@@ -1,10 +1,12 @@
 import { createApp } from 'vue'
+import { createPinia } from 'pinia'
 import Toast, { POSITION, type PluginOptions } from 'vue-toastification'
 import 'vue-toastification/dist/index.css'
 import App from './App.vue'
 import '@xterm/xterm/css/xterm.css'
 import './styles/base.css'
 import './styles/layout.css'
+import './styles/mission-control.css'
 import './styles/mobile-keyboard.css'
 
 const toastOptions: PluginOptions = {
@@ -20,5 +22,6 @@ const toastOptions: PluginOptions = {
 }
 
 const app = createApp(App)
+app.use(createPinia())
 app.use(Toast, toastOptions)
 app.mount('#app')

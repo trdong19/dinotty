@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -5,8 +6,8 @@ use std::time::Duration;
 
 use crate::session::SessionManager;
 
-use super::helpers::*;
-use super::types::*;
+use super::helpers::{copy_dir_all, extract_tar_gz, set_executable, validate_manifest};
+use super::types::{ManagedProcess, PluginInfo, PluginManifest, PluginStateValue};
 
 // ─── PluginManager ──────────────────────────────────────────────────────────
 
@@ -19,7 +20,14 @@ pub struct PluginManager {
 
 pub type PluginManagerState = Arc<PluginManager>;
 
+impl Default for PluginManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PluginManager {
+    #[must_use]
     pub fn new() -> Self {
         let home = dirs::home_dir().unwrap_or_default();
         Self {
@@ -32,7 +40,7 @@ impl PluginManager {
 
     pub async fn kill_plugin_processes(&self, plugin_id: &str) {
         if let Some((_, proc_map)) = self.processes.remove(plugin_id) {
-            for entry in proc_map.iter() {
+            for entry in &proc_map {
                 let mut child = entry.value().child.lock().await;
                 if let Some(ref mut c) = *child {
                     let _ = c.kill().await;
@@ -73,6 +81,7 @@ impl PluginManager {
                         .and_then(|m| m.modified().ok())
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs());
+                    let is_dev_link = entry.path().is_symlink();
                     self.registry.insert(
                         manifest.id.clone(),
                         PluginInfo {
@@ -80,6 +89,7 @@ impl PluginManager {
                             install_date,
                             state: PluginStateValue::Active,
                             error: None,
+                            is_dev_link,
                         },
                     );
                 }
@@ -87,8 +97,9 @@ impl PluginManager {
         }
     }
 
-    pub fn list(&self) -> Vec<PluginManifest> {
-        self.registry.iter().map(|r| r.manifest.clone()).collect()
+    #[must_use]
+    pub fn list(&self) -> Vec<PluginInfo> {
+        self.registry.iter().map(|r| r.value().clone()).collect()
     }
 
     pub fn watch_changes(self: &Arc<Self>, manager: Arc<SessionManager>) {
@@ -125,11 +136,7 @@ impl PluginManager {
 
             tracing::info!("Plugin file watcher started on {:?}", plugin_dir);
 
-            loop {
-                let Some(event) = rx.recv().await else {
-                    break;
-                };
-
+            while let Some(event) = rx.recv().await {
                 if matches!(event.kind, EventKind::Access(_)) {
                     continue;
                 }
@@ -138,27 +145,25 @@ impl PluginManager {
                 tokio::pin!(debounce);
                 loop {
                     tokio::select! {
-                        _ = &mut debounce => break,
+                        () = &mut debounce => break,
                         next = rx.recv() => {
                             if next.is_none() { return; }
                         }
                     }
                 }
 
-                let old_ids: Vec<String> =
-                    this.registry.iter().map(|e| e.key().clone()).collect();
+                let old_ids: Vec<String> = this.registry.iter().map(|e| e.key().clone()).collect();
 
                 this.registry.clear();
                 this.scan();
 
-                let new_ids: Vec<String> =
-                    this.registry.iter().map(|e| e.key().clone()).collect();
+                let new_ids: Vec<String> = this.registry.iter().map(|e| e.key().clone()).collect();
 
                 for id in &new_ids {
-                    if !old_ids.contains(id) {
-                        manager.broadcast_plugin_changed(id.clone(), "added".into());
-                    } else {
+                    if old_ids.contains(id) {
                         manager.broadcast_plugin_changed(id.clone(), "updated".into());
+                    } else {
+                        manager.broadcast_plugin_changed(id.clone(), "added".into());
                     }
                 }
                 for id in &old_ids {
@@ -172,7 +177,13 @@ impl PluginManager {
 
     // ─── Lifecycle Methods ───────────────────────────────────────────────────
 
-    pub async fn install(&self, archive: &[u8]) -> Result<PluginManifest, String> {
+    /// # Errors
+    /// Returns `Err` if the archive cannot be extracted, the manifest is invalid,
+    /// or the plugin directory operations fail.
+    ///
+    /// # Panics
+    /// Panics if `SystemTime::now()` fails (which should not happen).
+    pub fn install(&self, archive: &[u8]) -> Result<PluginManifest, String> {
         let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
         extract_tar_gz(archive, tmp.path())?;
 
@@ -186,10 +197,7 @@ impl PluginManager {
 
         let dest = self.plugin_dir.join(&manifest.id);
         if dest.exists() {
-            return Err(format!(
-                "plugin '{}' already installed, use update instead",
-                manifest.id
-            ));
+            return Err(format!("plugin '{}' already installed, use update instead", manifest.id));
         }
 
         std::fs::create_dir_all(&self.plugin_dir).map_err(|e| e.to_string())?;
@@ -211,18 +219,80 @@ impl PluginManager {
                 ),
                 state: PluginStateValue::Active,
                 error: None,
+                is_dev_link: false,
             },
         );
 
         Ok(manifest)
     }
 
-    pub async fn update(&self, id: &str, archive: &[u8]) -> Result<PluginManifest, String> {
-        let old_info = self
-            .registry
-            .get(id)
-            .ok_or_else(|| format!("plugin '{id}' not installed"))?
-            .clone();
+    /// # Errors
+    /// Returns `Err` if the manifest is invalid or the directory operations fail.
+    ///
+    /// # Panics
+    /// Panics if `SystemTime::now()` fails (which should not happen).
+    pub fn install_from_dir(
+        &self,
+        src: &std::path::Path,
+        dev_link: bool,
+    ) -> Result<PluginManifest, String> {
+        let manifest_path = src.join("plugin.json");
+        let content = std::fs::read_to_string(&manifest_path)
+            .map_err(|_| "plugin.json not found in directory".to_string())?;
+        let manifest: PluginManifest =
+            serde_json::from_str(&content).map_err(|e| format!("invalid plugin.json: {e}"))?;
+
+        validate_manifest(&manifest)?;
+
+        let dest = self.plugin_dir.join(&manifest.id);
+        if dest.exists() {
+            return Err(format!("plugin '{}' already installed, use update instead", manifest.id));
+        }
+
+        std::fs::create_dir_all(&self.plugin_dir).map_err(|e| e.to_string())?;
+
+        if dev_link {
+            // Create a symlink from src -> plugin_dir/id
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(src, &dest).map_err(|e| format!("symlink failed: {e}"))?;
+            #[cfg(not(unix))]
+            {
+                let _ = (src, &dest);
+                return Err("dev-link is only supported on Unix".into());
+            }
+        } else {
+            copy_dir_all(src, &dest)?;
+        }
+
+        if let Some(ref bin) = manifest.bin {
+            set_executable(&dest.join(&bin.entry))?;
+        }
+
+        self.registry.insert(
+            manifest.id.clone(),
+            PluginInfo {
+                manifest: manifest.clone(),
+                install_date: Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                ),
+                state: PluginStateValue::Active,
+                error: None,
+                is_dev_link: dev_link,
+            },
+        );
+
+        Ok(manifest)
+    }
+
+    /// # Errors
+    /// Returns `Err` if the plugin is not installed, the archive cannot be extracted,
+    /// the manifest is invalid, or the directory operations fail.
+    pub fn update(&self, id: &str, archive: &[u8]) -> Result<PluginManifest, String> {
+        let old_info =
+            self.registry.get(id).ok_or_else(|| format!("plugin '{id}' not installed"))?.clone();
 
         let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
         extract_tar_gz(archive, tmp.path())?;
@@ -266,12 +336,15 @@ impl PluginManager {
                 install_date: old_info.install_date,
                 state: PluginStateValue::Active,
                 error: None,
+                is_dev_link: false,
             },
         );
 
         Ok(manifest)
     }
 
+    /// # Errors
+    /// Returns `Err` if the plugin directory cannot be removed.
     pub async fn delete(&self, id: &str, keep_data: bool) -> Result<(), String> {
         self.kill_plugin_processes(id).await;
 

@@ -1,6 +1,37 @@
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::struct_excessive_bools
+)]
 use std::collections::VecDeque;
+use std::fmt::Write;
+use std::time::Instant;
 use unicode_width::UnicodeWidthChar;
 use vte::{Params, Perform};
+
+/// OSC 133 command detection state
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandState {
+    Idle,
+    CommandStart,
+    Executing,
+}
+
+/// Result of a detected command execution
+#[derive(Clone, Debug)]
+pub struct CommandResult {
+    pub exit_code: i32,
+    pub duration_ms: u64,
+    pub method: String, // "shell_integration" or "prompt_detection"
+}
+
+/// Tracks a pending command for collecting output
+struct PendingCommand {
+    start_time: Instant,
+    output_buf: String,
+}
 
 #[derive(Clone, Copy, Default)]
 pub struct CellAttrs {
@@ -32,7 +63,12 @@ struct Cell {
 
 impl Default for Cell {
     fn default() -> Self {
-        Self { ch: ' ', combining: ['\0'; MAX_COMBINING], combining_len: 0, attrs: CellAttrs::default() }
+        Self {
+            ch: ' ',
+            combining: ['\0'; MAX_COMBINING],
+            combining_len: 0,
+            attrs: CellAttrs::default(),
+        }
     }
 }
 
@@ -53,17 +89,11 @@ impl Cell {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct CursorState {
     row: usize,
     col: usize,
     attrs: CellAttrs,
-}
-
-impl Default for CursorState {
-    fn default() -> Self {
-        Self { row: 0, col: 0, attrs: CellAttrs::default() }
-    }
 }
 
 #[derive(Clone)]
@@ -137,9 +167,16 @@ pub struct VirtualScreen {
     cols: usize,
     rows: usize,
     saved_cursor: Option<CursorState>,
+    // OSC 133 command detection
+    command_state: CommandState,
+    pending_command: Option<PendingCommand>,
+    command_results: Vec<CommandResult>,
+    // Prompt detection fallback
+    last_output_time: Option<Instant>,
 }
 
 impl VirtualScreen {
+    #[must_use]
     pub fn new(cols: usize, rows: usize) -> Self {
         Self {
             primary: ScreenBuffer::new(cols, rows),
@@ -150,16 +187,139 @@ impl VirtualScreen {
             cols,
             rows,
             saved_cursor: None,
+            command_state: CommandState::Idle,
+            pending_command: None,
+            command_results: Vec::new(),
+            last_output_time: None,
         }
     }
 
+    /// Drain all pending command results. Called by the WS handler after feeding output.
+    pub fn drain_command_results(&mut self) -> Vec<CommandResult> {
+        std::mem::take(&mut self.command_results)
+    }
+
+    /// Get the collected stdout from the current/last command
+    pub fn take_command_output(&mut self) -> String {
+        self.pending_command.as_mut().map(|p| std::mem::take(&mut p.output_buf)).unwrap_or_default()
+    }
+
+    /// Check if shell integration (OSC 133) has been detected
+    #[must_use]
+    pub fn has_shell_integration(&self) -> bool {
+        !self.command_results.is_empty()
+            || matches!(self.command_state, CommandState::CommandStart | CommandState::Executing)
+    }
+
+    /// Check if enough time has passed since last output for prompt detection.
+    /// Returns true if we should attempt prompt detection (>= 100ms silence).
+    #[must_use]
+    pub fn should_check_prompt(&self) -> bool {
+        self.last_output_time.is_some_and(|t| t.elapsed().as_millis() >= 100)
+            && self.command_state == CommandState::Idle
+    }
+
+    /// Attempt prompt detection on the current screen content.
+    /// Returns a `CommandResult` if a prompt pattern is found at the cursor line.
+    pub fn detect_prompt(&mut self) -> Option<CommandResult> {
+        use regex::Regex;
+        use std::sync::OnceLock;
+
+        static PROMPT_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+        let patterns = PROMPT_PATTERNS.get_or_init(|| {
+            [
+                r"^[#$%>] ?$",
+                r"^[a-zA-Z0-9_.\-]+@[a-zA-Z0-9_.\-]+[:~].*[$#] ?$",
+                r"^[a-zA-Z0-9_.\-]+@.*\$ ?$",
+            ]
+            .iter()
+            .filter_map(|p| Regex::new(p).ok())
+            .collect()
+        });
+
+        // Get the current cursor line content
+        let buf = if self.using_alternate { &self.alternate } else { &self.primary };
+        let row = buf.cursor.row;
+        if row >= buf.rows {
+            return None;
+        }
+
+        let line: String = buf.cells[row]
+            .iter()
+            .take(buf.cursor.col + 1)
+            .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+            .collect();
+        let line = line.trim_end();
+
+        for re in patterns {
+            if re.is_match(line) {
+                let duration_ms = self
+                    .pending_command
+                    .as_ref()
+                    .map_or(0, |p| p.start_time.elapsed().as_millis() as u64);
+
+                self.command_state = CommandState::Idle;
+                self.pending_command.take();
+
+                return Some(CommandResult {
+                    exit_code: -1,
+                    duration_ms,
+                    method: "prompt_detection".to_string(),
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Called when a command is sent to the terminal (from agent API).
+    /// Sets up state for command output collection.
+    pub fn begin_command_tracking(&mut self) {
+        self.command_state = CommandState::CommandStart;
+        self.pending_command =
+            Some(PendingCommand { start_time: Instant::now(), output_buf: String::new() });
+    }
+
+    /// Force-finish command tracking (e.g. on timeout). Returns collected output.
+    pub fn finish_command_tracking(&mut self, exit_code: i32) -> (String, CommandResult) {
+        let pending = self.pending_command.take();
+        let stdout = pending.as_ref().map(|p| p.output_buf.clone()).unwrap_or_default();
+        let duration_ms = pending.map_or(0, |p| p.start_time.elapsed().as_millis() as u64);
+
+        let result = CommandResult { exit_code, duration_ms, method: "timeout".to_string() };
+        self.command_state = CommandState::Idle;
+        (stdout, result)
+    }
+
     pub fn feed(&mut self, data: &[u8]) {
+        // Track output timing for prompt detection fallback
+        self.last_output_time = Some(Instant::now());
+
+        // Collect visible output for command stdout capture
+        if matches!(self.command_state, CommandState::CommandStart | CommandState::Executing) {
+            if let Some(ref mut pending) = self.pending_command {
+                // Only collect printable ASCII and UTF-8 text, skip ESC sequences
+                for &b in data {
+                    if b >= 0x20 && b != 0x7f {
+                        pending.output_buf.push(b as char);
+                    }
+                }
+                // Cap buffer at 1MB
+                if pending.output_buf.len() > 1024 * 1024 {
+                    pending.output_buf.drain(..512 * 1024);
+                }
+            }
+        }
+
         let mut performer = ScreenPerformer {
             screen: if self.using_alternate { &mut self.alternate } else { &mut self.primary },
             scrollback: &mut self.scrollback,
             saved_cursor: &mut self.saved_cursor,
             pending_switch: None,
             using_alternate: self.using_alternate,
+            command_state: &mut self.command_state,
+            pending_command: &mut self.pending_command,
+            command_results: &mut self.command_results,
         };
 
         for &byte in data {
@@ -177,8 +337,10 @@ impl VirtualScreen {
                         saved_cursor: &mut self.saved_cursor,
                         pending_switch: None,
                         using_alternate: true,
+                        command_state: &mut self.command_state,
+                        pending_command: &mut self.pending_command,
+                        command_results: &mut self.command_results,
                     };
-                    continue;
                 } else if !enter && performer.using_alternate {
                     let saved = self.saved_cursor.clone();
                     // Recreate performer pointing at primary screen
@@ -188,11 +350,13 @@ impl VirtualScreen {
                         saved_cursor: &mut self.saved_cursor,
                         pending_switch: None,
                         using_alternate: false,
+                        command_state: &mut self.command_state,
+                        pending_command: &mut self.pending_command,
+                        command_results: &mut self.command_results,
                     };
                     if let Some(ref s) = saved {
                         performer.screen.cursor = s.clone();
                     }
-                    continue;
                 }
             }
         }
@@ -206,6 +370,7 @@ impl VirtualScreen {
         self.alternate.resize(cols, rows);
     }
 
+    #[must_use]
     pub fn snapshot_scrollback_chunks(&self, chunk_lines: usize) -> Vec<String> {
         if self.using_alternate || self.scrollback.is_empty() {
             return Vec::new();
@@ -216,10 +381,14 @@ impl VirtualScreen {
 
         for row in &self.scrollback {
             let mut prev_attrs = CellAttrs::default();
-            let last_content = row.iter().rposition(|c| (c.ch != ' ' && c.ch != '\0') || has_attrs(&c.attrs))
-                .map(|i| i + 1).unwrap_or(0);
+            let last_content = row
+                .iter()
+                .rposition(|c| (c.ch != ' ' && c.ch != '\0') || has_attrs(&c.attrs))
+                .map_or(0, |i| i + 1);
             for cell in &row[..last_content] {
-                if cell.ch == '\0' { continue; }
+                if cell.ch == '\0' {
+                    continue;
+                }
                 if !attrs_eq(&cell.attrs, &prev_attrs) {
                     current.push_str(&encode_sgr(&cell.attrs));
                     prev_attrs = cell.attrs;
@@ -243,12 +412,13 @@ impl VirtualScreen {
         chunks
     }
 
+    #[must_use]
     pub fn snapshot(&self) -> String {
         let buf = if self.using_alternate { &self.alternate } else { &self.primary };
         let mut out = String::with_capacity(self.cols * self.rows * 4);
 
         out.push_str("\x1b[?25l"); // hide cursor during draw
-        out.push_str("\x1b[0m");  // reset all attributes
+        out.push_str("\x1b[0m"); // reset all attributes
 
         if self.using_alternate {
             out.push_str("\x1b[?1049h"); // enter alternate screen
@@ -257,14 +427,18 @@ impl VirtualScreen {
         // Render each row
         let mut prev_attrs = CellAttrs::default();
         for (row_idx, row) in buf.cells.iter().enumerate() {
-            out.push_str(&format!("\x1b[{};1H\x1b[2K", row_idx + 1)); // move to row start + erase line
+            let _ = write!(out, "\x1b[{};1H\x1b[2K", row_idx + 1); // move to row start + erase line
 
             // Find last non-space column to avoid trailing spaces
-            let last_content = row.iter().rposition(|c| (c.ch != ' ' && c.ch != '\0') || has_attrs(&c.attrs))
-                .map(|i| i + 1).unwrap_or(0);
+            let last_content = row
+                .iter()
+                .rposition(|c| (c.ch != ' ' && c.ch != '\0') || has_attrs(&c.attrs))
+                .map_or(0, |i| i + 1);
 
             for cell in &row[..last_content] {
-                if cell.ch == '\0' { continue; }
+                if cell.ch == '\0' {
+                    continue;
+                }
                 if !attrs_eq(&cell.attrs, &prev_attrs) {
                     out.push_str(&encode_sgr(&cell.attrs));
                     prev_attrs = cell.attrs;
@@ -283,56 +457,157 @@ impl VirtualScreen {
 
         // Restore scroll region if non-default
         if buf.scroll_top != 0 || buf.scroll_bottom != buf.rows - 1 {
-            out.push_str(&format!("\x1b[{};{}r", buf.scroll_top + 1, buf.scroll_bottom + 1));
+            let _ = write!(out, "\x1b[{};{}r", buf.scroll_top + 1, buf.scroll_bottom + 1);
         }
 
         // Restore cursor position
-        out.push_str(&format!("\x1b[{};{}H", buf.cursor.row + 1, buf.cursor.col + 1));
+        let _ = write!(out, "\x1b[{};{}H", buf.cursor.row + 1, buf.cursor.col + 1);
         out.push_str("\x1b[?25h"); // show cursor
 
         out
     }
+
+    #[must_use]
+    pub fn snapshot_plain(&self) -> String {
+        let buf = if self.using_alternate { &self.alternate } else { &self.primary };
+        let mut lines = Vec::with_capacity(buf.rows);
+
+        for row in &buf.cells {
+            let mut line = String::with_capacity(self.cols);
+            let last_content =
+                row.iter().rposition(|c| c.ch != ' ' && c.ch != '\0').map_or(0, |i| i + 1);
+            for cell in &row[..last_content] {
+                if cell.ch == '\0' {
+                    line.push(' ');
+                } else {
+                    line.push(cell.ch);
+                }
+            }
+            lines.push(line);
+        }
+        lines.join("\n")
+    }
+
+    #[must_use]
+    pub fn snapshot_scrollback_plain(&self, max_lines: Option<usize>) -> Vec<String> {
+        if self.using_alternate || self.scrollback.is_empty() {
+            return Vec::new();
+        }
+        let skip =
+            if let Some(max) = max_lines { self.scrollback.len().saturating_sub(max) } else { 0 };
+
+        self.scrollback
+            .iter()
+            .skip(skip)
+            .map(|row| {
+                let mut line = String::with_capacity(self.cols);
+                let last_content =
+                    row.iter().rposition(|c| c.ch != ' ' && c.ch != '\0').map_or(0, |i| i + 1);
+                for cell in &row[..last_content] {
+                    if cell.ch == '\0' {
+                        line.push(' ');
+                    } else {
+                        line.push(cell.ch);
+                    }
+                }
+                line
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    #[must_use]
+    pub fn is_using_alternate(&self) -> bool {
+        self.using_alternate
+    }
+
+    #[must_use]
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Get current cursor position (row, col).
+    #[must_use]
+    pub fn cursor_position(&self) -> (usize, usize) {
+        let buf = if self.using_alternate { &self.alternate } else { &self.primary };
+        (buf.cursor.row, buf.cursor.col)
+    }
 }
 
 fn has_attrs(a: &CellAttrs) -> bool {
-    a.fg.is_some() || a.bg.is_some() || a.bold || a.dim || a.italic || a.underline || a.inverse || a.strikethrough
+    a.fg.is_some()
+        || a.bg.is_some()
+        || a.bold
+        || a.dim
+        || a.italic
+        || a.underline
+        || a.inverse
+        || a.strikethrough
 }
 
 fn attrs_eq(a: &CellAttrs, b: &CellAttrs) -> bool {
-    color_eq(&a.fg, &b.fg) && color_eq(&a.bg, &b.bg)
-        && a.bold == b.bold && a.dim == b.dim && a.italic == b.italic
-        && a.underline == b.underline && a.inverse == b.inverse && a.strikethrough == b.strikethrough
+    color_eq(a.fg, b.fg)
+        && color_eq(a.bg, b.bg)
+        && a.bold == b.bold
+        && a.dim == b.dim
+        && a.italic == b.italic
+        && a.underline == b.underline
+        && a.inverse == b.inverse
+        && a.strikethrough == b.strikethrough
 }
 
-fn color_eq(a: &Option<Color>, b: &Option<Color>) -> bool {
+fn color_eq(a: Option<Color>, b: Option<Color>) -> bool {
     match (a, b) {
         (None, None) => true,
         (Some(Color::Indexed(x)), Some(Color::Indexed(y))) => x == y,
-        (Some(Color::Rgb(r1, g1, b1)), Some(Color::Rgb(r2, g2, b2))) => r1 == r2 && g1 == g2 && b1 == b2,
+        (Some(Color::Rgb(r1, g1, b1)), Some(Color::Rgb(r2, g2, b2))) => {
+            r1 == r2 && g1 == g2 && b1 == b2
+        }
         _ => false,
     }
 }
 
 fn encode_sgr(attrs: &CellAttrs) -> String {
     let mut params: Vec<String> = vec!["0".to_string()]; // reset first
-    if attrs.bold { params.push("1".to_string()); }
-    if attrs.dim { params.push("2".to_string()); }
-    if attrs.italic { params.push("3".to_string()); }
-    if attrs.underline { params.push("4".to_string()); }
-    if attrs.inverse { params.push("7".to_string()); }
-    if attrs.strikethrough { params.push("9".to_string()); }
+    if attrs.bold {
+        params.push("1".to_string());
+    }
+    if attrs.dim {
+        params.push("2".to_string());
+    }
+    if attrs.italic {
+        params.push("3".to_string());
+    }
+    if attrs.underline {
+        params.push("4".to_string());
+    }
+    if attrs.inverse {
+        params.push("7".to_string());
+    }
+    if attrs.strikethrough {
+        params.push("9".to_string());
+    }
     match attrs.fg {
         Some(Color::Indexed(c)) if c < 8 => params.push(format!("{}", 30 + c)),
         Some(Color::Indexed(c)) if c < 16 => params.push(format!("{}", 90 + c - 8)),
-        Some(Color::Indexed(c)) => params.push(format!("38;5;{}", c)),
-        Some(Color::Rgb(r, g, b)) => params.push(format!("38;2;{};{};{}", r, g, b)),
+        Some(Color::Indexed(c)) => params.push(format!("38;5;{c}")),
+        Some(Color::Rgb(r, g, b)) => params.push(format!("38;2;{r};{g};{b}")),
         None => {}
     }
     match attrs.bg {
         Some(Color::Indexed(c)) if c < 8 => params.push(format!("{}", 40 + c)),
         Some(Color::Indexed(c)) if c < 16 => params.push(format!("{}", 100 + c - 8)),
-        Some(Color::Indexed(c)) => params.push(format!("48;5;{}", c)),
-        Some(Color::Rgb(r, g, b)) => params.push(format!("48;2;{};{};{}", r, g, b)),
+        Some(Color::Indexed(c)) => params.push(format!("48;5;{c}")),
+        Some(Color::Rgb(r, g, b)) => params.push(format!("48;2;{r};{g};{b}")),
         None => {}
     }
     format!("\x1b[{}m", params.join(";"))
@@ -345,9 +620,12 @@ struct ScreenPerformer<'a> {
     saved_cursor: &'a mut Option<CursorState>,
     pending_switch: Option<bool>,
     using_alternate: bool,
+    command_state: &'a mut CommandState,
+    pending_command: &'a mut Option<PendingCommand>,
+    command_results: &'a mut Vec<CommandResult>,
 }
 
-impl<'a> Perform for ScreenPerformer<'a> {
+impl Perform for ScreenPerformer<'_> {
     fn print(&mut self, c: char) {
         let width = UnicodeWidthChar::width(c).unwrap_or(0);
         if width == 0 {
@@ -393,9 +671,19 @@ impl<'a> Perform for ScreenPerformer<'a> {
                     }
                 }
             }
-            self.screen.cells[row][col] = Cell { ch: c, combining: ['\0'; MAX_COMBINING], combining_len: 0, attrs: self.screen.cursor.attrs };
+            self.screen.cells[row][col] = Cell {
+                ch: c,
+                combining: ['\0'; MAX_COMBINING],
+                combining_len: 0,
+                attrs: self.screen.cursor.attrs,
+            };
             if width == 2 && col + 1 < self.screen.cols {
-                self.screen.cells[row][col + 1] = Cell { ch: '\0', combining: ['\0'; MAX_COMBINING], combining_len: 0, attrs: self.screen.cursor.attrs };
+                self.screen.cells[row][col + 1] = Cell {
+                    ch: '\0',
+                    combining: ['\0'; MAX_COMBINING],
+                    combining_len: 0,
+                    attrs: self.screen.cursor.attrs,
+                };
             }
         }
         self.screen.cursor.col += width;
@@ -403,18 +691,17 @@ impl<'a> Perform for ScreenPerformer<'a> {
 
     fn execute(&mut self, byte: u8) {
         match byte {
-            0x08 => { // BS
-                if self.screen.cursor.col > 0 {
+            0x08 // BS
+                if self.screen.cursor.col > 0 => {
                     self.screen.cursor.col -= 1;
                 }
-            }
             0x09 => { // HT (tab)
                 self.screen.cursor.col = ((self.screen.cursor.col / 8) + 1) * 8;
                 if self.screen.cursor.col >= self.screen.cols {
                     self.screen.cursor.col = self.screen.cols - 1;
                 }
             }
-            0x0A | 0x0B | 0x0C => { // LF, VT, FF
+            0x0A..=0x0C => { // LF, VT, FF
                 self.screen.cursor.row += 1;
                 if self.screen.cursor.row > self.screen.scroll_bottom {
                     self.screen.cursor.row = self.screen.scroll_bottom;
@@ -431,8 +718,84 @@ impl<'a> Perform for ScreenPerformer<'a> {
     fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
     fn put(&mut self, _byte: u8) {}
     fn unhook(&mut self) {}
-    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        // OSC 133: Shell Integration (VS Code / FinalTerm / iTerm2)
+        // Format: ESC ] 133 ; <cmd> [ ; <args> ] ST
+        //   A = Prompt start
+        //   B = Command start (after user presses Enter)
+        //   C = Command executed (not all shells emit this)
+        //   D = Command finished, followed by ;exit_code
+        if params.len() < 2 {
+            return;
+        }
+        // First param should be "133"
+        if params[0] != b"133" {
+            return;
+        }
+        let cmd = params[1];
+        match cmd {
+            b"A" => {
+                // Prompt start
+                *self.command_state = CommandState::Idle;
+                self.pending_command.take();
+            }
+            b"B" => {
+                // Command start (user executed a command)
+                // If already tracking a command (double B without D), force-finish the old one
+                if matches!(
+                    *self.command_state,
+                    CommandState::CommandStart | CommandState::Executing
+                ) {
+                    if let Some(pending) = self.pending_command.take() {
+                        let duration_ms = pending.start_time.elapsed().as_millis() as u64;
+                        self.command_results.push(CommandResult {
+                            exit_code: -1,
+                            duration_ms,
+                            method: "interrupted".to_string(),
+                        });
+                    }
+                }
+                *self.command_state = CommandState::CommandStart;
+                *self.pending_command =
+                    Some(PendingCommand { start_time: Instant::now(), output_buf: String::new() });
+            }
+            b"D" => {
+                // Command finished
+                let exit_code = if params.len() >= 3 {
+                    std::str::from_utf8(params[2])
+                        .ok()
+                        .and_then(|s| s.parse::<i32>().ok())
+                        .unwrap_or(-1)
+                } else {
+                    -1
+                };
 
+                let duration_ms = self
+                    .pending_command
+                    .as_ref()
+                    .map_or(0, |p| p.start_time.elapsed().as_millis() as u64);
+
+                let stdout = self
+                    .pending_command
+                    .as_mut()
+                    .map(|p| std::mem::take(&mut p.output_buf))
+                    .unwrap_or_default();
+
+                self.command_results.push(CommandResult {
+                    exit_code,
+                    duration_ms,
+                    method: "shell_integration".to_string(),
+                });
+
+                *self.command_state = CommandState::Idle;
+                self.pending_command.take();
+                let _ = stdout; // available for future use
+            }
+            _ => {}
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         let ps: Vec<u16> = params.iter().flat_map(|s| s.iter().copied()).collect();
         let p0 = ps.first().copied().unwrap_or(0) as usize;
@@ -462,65 +825,98 @@ impl<'a> Perform for ScreenPerformer<'a> {
         }
 
         match action {
-            'A' => { // CUU - cursor up
+            'A' => {
+                // CUU - cursor up
                 let n = if p0 == 0 { 1 } else { p0 };
                 self.screen.cursor.row = self.screen.cursor.row.saturating_sub(n);
             }
-            'B' => { // CUD - cursor down
+            'B' => {
+                // CUD - cursor down
                 let n = if p0 == 0 { 1 } else { p0 };
                 self.screen.cursor.row = (self.screen.cursor.row + n).min(self.screen.rows - 1);
             }
-            'C' => { // CUF - cursor forward
+            'C' => {
+                // CUF - cursor forward
                 let n = if p0 == 0 { 1 } else { p0 };
                 self.screen.cursor.col = (self.screen.cursor.col + n).min(self.screen.cols - 1);
             }
-            'D' => { // CUB - cursor back
+            'D' => {
+                // CUB - cursor back
                 let n = if p0 == 0 { 1 } else { p0 };
                 self.screen.cursor.col = self.screen.cursor.col.saturating_sub(n);
             }
-            'H' | 'f' => { // CUP - cursor position
+            'H' | 'f' => {
+                // CUP - cursor position
                 let row = if p0 == 0 { 1 } else { p0 };
                 let col = if p1 == 0 { 1 } else { p1 };
                 self.screen.cursor.row = (row - 1).min(self.screen.rows - 1);
                 self.screen.cursor.col = (col - 1).min(self.screen.cols - 1);
             }
-            'J' => { // ED - erase display
+            'J' => {
+                // ED - erase display
                 match p0 {
-                    0 => { // from cursor to end
+                    0 => {
+                        // from cursor to end
                         let row = self.screen.cursor.row;
                         let col = self.screen.cursor.col;
-                        for c in &mut self.screen.cells[row][col..] { *c = Cell::default(); }
+                        for c in &mut self.screen.cells[row][col..] {
+                            *c = Cell::default();
+                        }
                         for r in (row + 1)..self.screen.rows {
-                            for c in &mut self.screen.cells[r] { *c = Cell::default(); }
+                            for c in &mut self.screen.cells[r] {
+                                *c = Cell::default();
+                            }
                         }
                     }
-                    1 => { // from start to cursor
+                    1 => {
+                        // from start to cursor
                         let row = self.screen.cursor.row;
                         let col = self.screen.cursor.col;
                         for r in 0..row {
-                            for c in &mut self.screen.cells[r] { *c = Cell::default(); }
+                            for c in &mut self.screen.cells[r] {
+                                *c = Cell::default();
+                            }
                         }
-                        for c in &mut self.screen.cells[row][..=col.min(self.screen.cols - 1)] { *c = Cell::default(); }
+                        for c in &mut self.screen.cells[row][..=col.min(self.screen.cols - 1)] {
+                            *c = Cell::default();
+                        }
                     }
-                    2 | 3 => { // entire screen
+                    2 | 3 => {
+                        // entire screen
                         for r in &mut self.screen.cells {
-                            for c in r { *c = Cell::default(); }
+                            for c in r {
+                                *c = Cell::default();
+                            }
                         }
                     }
                     _ => {}
                 }
             }
-            'K' => { // EL - erase line
+            'K' => {
+                // EL - erase line
                 let row = self.screen.cursor.row;
                 let col = self.screen.cursor.col;
                 match p0 {
-                    0 => { for c in &mut self.screen.cells[row][col..] { *c = Cell::default(); } }
-                    1 => { for c in &mut self.screen.cells[row][..=col.min(self.screen.cols - 1)] { *c = Cell::default(); } }
-                    2 => { for c in &mut self.screen.cells[row] { *c = Cell::default(); } }
+                    0 => {
+                        for c in &mut self.screen.cells[row][col..] {
+                            *c = Cell::default();
+                        }
+                    }
+                    1 => {
+                        for c in &mut self.screen.cells[row][..=col.min(self.screen.cols - 1)] {
+                            *c = Cell::default();
+                        }
+                    }
+                    2 => {
+                        for c in &mut self.screen.cells[row] {
+                            *c = Cell::default();
+                        }
+                    }
                     _ => {}
                 }
             }
-            'L' => { // IL - insert lines
+            'L' => {
+                // IL - insert lines
                 let n = if p0 == 0 { 1 } else { p0 };
                 let row = self.screen.cursor.row;
                 for _ in 0..n {
@@ -530,17 +926,21 @@ impl<'a> Perform for ScreenPerformer<'a> {
                     self.screen.cells.insert(row, vec![Cell::default(); self.screen.cols]);
                 }
             }
-            'M' => { // DL - delete lines
+            'M' => {
+                // DL - delete lines
                 let n = if p0 == 0 { 1 } else { p0 };
                 let row = self.screen.cursor.row;
                 for _ in 0..n {
                     if row < self.screen.cells.len() {
                         self.screen.cells.remove(row);
                     }
-                    self.screen.cells.insert(self.screen.scroll_bottom, vec![Cell::default(); self.screen.cols]);
+                    self.screen
+                        .cells
+                        .insert(self.screen.scroll_bottom, vec![Cell::default(); self.screen.cols]);
                 }
             }
-            'P' => { // DCH - delete characters
+            'P' => {
+                // DCH - delete characters
                 let n = if p0 == 0 { 1 } else { p0 };
                 let row = self.screen.cursor.row;
                 let col = self.screen.cursor.col;
@@ -551,7 +951,8 @@ impl<'a> Perform for ScreenPerformer<'a> {
                     }
                 }
             }
-            '@' => { // ICH - insert characters
+            '@' => {
+                // ICH - insert characters
                 let n = if p0 == 0 { 1 } else { p0 };
                 let row = self.screen.cursor.row;
                 let col = self.screen.cursor.col;
@@ -560,15 +961,22 @@ impl<'a> Perform for ScreenPerformer<'a> {
                     self.screen.cells[row].truncate(self.screen.cols);
                 }
             }
-            'S' => { // SU - scroll up
+            'S' => {
+                // SU - scroll up
                 let n = if p0 == 0 { 1 } else { p0 };
-                for _ in 0..n { self.screen.scroll_up(self.scrollback); }
+                for _ in 0..n {
+                    self.screen.scroll_up(self.scrollback);
+                }
             }
-            'T' => { // SD - scroll down
+            'T' => {
+                // SD - scroll down
                 let n = if p0 == 0 { 1 } else { p0 };
-                for _ in 0..n { self.screen.scroll_down(); }
+                for _ in 0..n {
+                    self.screen.scroll_down();
+                }
             }
-            'r' => { // DECSTBM - set scroll region
+            'r' => {
+                // DECSTBM - set scroll region
                 let top = if p0 == 0 { 1 } else { p0 };
                 let bottom = if p1 == 0 { self.screen.rows } else { p1 };
                 self.screen.scroll_top = (top - 1).min(self.screen.rows - 1);
@@ -576,15 +984,18 @@ impl<'a> Perform for ScreenPerformer<'a> {
                 self.screen.cursor.row = 0;
                 self.screen.cursor.col = 0;
             }
-            'd' => { // VPA - line position absolute
+            'd' => {
+                // VPA - line position absolute
                 let row = if p0 == 0 { 1 } else { p0 };
                 self.screen.cursor.row = (row - 1).min(self.screen.rows - 1);
             }
-            'G' | '`' => { // CHA - cursor character absolute
+            'G' | '`' => {
+                // CHA - cursor character absolute
                 let col = if p0 == 0 { 1 } else { p0 };
                 self.screen.cursor.col = (col - 1).min(self.screen.cols - 1);
             }
-            'X' => { // ECH - erase characters
+            'X' => {
+                // ECH - erase characters
                 let n = if p0 == 0 { 1 } else { p0 };
                 let row = self.screen.cursor.row;
                 let col = self.screen.cursor.col;
@@ -594,7 +1005,8 @@ impl<'a> Perform for ScreenPerformer<'a> {
                     }
                 }
             }
-            'm' => { // SGR - select graphic rendition
+            'm' => {
+                // SGR - select graphic rendition
                 self.apply_sgr(params);
             }
             _ => {}
@@ -603,15 +1015,18 @@ impl<'a> Perform for ScreenPerformer<'a> {
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
         match (intermediates, byte) {
-            (b"7", _) | ([], b'7') => { // DECSC - save cursor
+            (b"7", _) | ([], b'7') => {
+                // DECSC - save cursor
                 *self.saved_cursor = Some(self.screen.cursor.clone());
             }
-            (b"8", _) | ([], b'8') => { // DECRC - restore cursor
+            (b"8", _) | ([], b'8') => {
+                // DECRC - restore cursor
                 if let Some(ref saved) = self.saved_cursor {
                     self.screen.cursor = saved.clone();
                 }
             }
-            ([], b'M') => { // RI - reverse index (scroll down)
+            ([], b'M') => {
+                // RI - reverse index (scroll down)
                 if self.screen.cursor.row == self.screen.scroll_top {
                     self.screen.scroll_down();
                 } else if self.screen.cursor.row > 0 {
@@ -623,7 +1038,7 @@ impl<'a> Perform for ScreenPerformer<'a> {
     }
 }
 
-impl<'a> ScreenPerformer<'a> {
+impl ScreenPerformer<'_> {
     fn apply_sgr(&mut self, params: &Params) {
         if params.is_empty() {
             self.screen.cursor.attrs = CellAttrs::default();
@@ -633,8 +1048,10 @@ impl<'a> ScreenPerformer<'a> {
         // Each sub-slice from Params represents colon-separated sub-parameters.
         // E.g. "4:3" yields one sub-slice [4, 3], while "4;3" yields two sub-slices [4] and [3].
         let mut sgr_items: Vec<(u16, Option<u16>)> = Vec::new();
-        for sub in params.iter() {
-            if sub.is_empty() { continue; }
+        for sub in params {
+            if sub.is_empty() {
+                continue;
+            }
             // First element is the SGR code; second (if present) is a colon sub-parameter
             sgr_items.push((sub[0], sub.get(1).copied()));
         }
@@ -656,7 +1073,10 @@ impl<'a> ScreenPerformer<'a> {
                 }
                 7 => self.screen.cursor.attrs.inverse = true,
                 9 => self.screen.cursor.attrs.strikethrough = true,
-                21 | 22 => { self.screen.cursor.attrs.bold = false; self.screen.cursor.attrs.dim = false; }
+                21 | 22 => {
+                    self.screen.cursor.attrs.bold = false;
+                    self.screen.cursor.attrs.dim = false;
+                }
                 23 => self.screen.cursor.attrs.italic = false,
                 24 => self.screen.cursor.attrs.underline = false,
                 27 => self.screen.cursor.attrs.inverse = false,
@@ -666,12 +1086,20 @@ impl<'a> ScreenPerformer<'a> {
                     i += 1;
                     if i < sgr_items.len() {
                         match sgr_items[i].0 {
-                            5 => { i += 1; if i < sgr_items.len() { self.screen.cursor.attrs.fg = Some(Color::Indexed(sgr_items[i].0 as u8)); } }
-                            2 => {
-                                if i + 3 < sgr_items.len() {
-                                    self.screen.cursor.attrs.fg = Some(Color::Rgb(sgr_items[i+1].0 as u8, sgr_items[i+2].0 as u8, sgr_items[i+3].0 as u8));
-                                    i += 3;
+                            5 => {
+                                i += 1;
+                                if i < sgr_items.len() {
+                                    self.screen.cursor.attrs.fg =
+                                        Some(Color::Indexed(sgr_items[i].0 as u8));
                                 }
+                            }
+                            2 if i + 3 < sgr_items.len() => {
+                                self.screen.cursor.attrs.fg = Some(Color::Rgb(
+                                    sgr_items[i + 1].0 as u8,
+                                    sgr_items[i + 2].0 as u8,
+                                    sgr_items[i + 3].0 as u8,
+                                ));
+                                i += 3;
                             }
                             _ => {}
                         }
@@ -683,20 +1111,32 @@ impl<'a> ScreenPerformer<'a> {
                     i += 1;
                     if i < sgr_items.len() {
                         match sgr_items[i].0 {
-                            5 => { i += 1; if i < sgr_items.len() { self.screen.cursor.attrs.bg = Some(Color::Indexed(sgr_items[i].0 as u8)); } }
-                            2 => {
-                                if i + 3 < sgr_items.len() {
-                                    self.screen.cursor.attrs.bg = Some(Color::Rgb(sgr_items[i+1].0 as u8, sgr_items[i+2].0 as u8, sgr_items[i+3].0 as u8));
-                                    i += 3;
+                            5 => {
+                                i += 1;
+                                if i < sgr_items.len() {
+                                    self.screen.cursor.attrs.bg =
+                                        Some(Color::Indexed(sgr_items[i].0 as u8));
                                 }
+                            }
+                            2 if i + 3 < sgr_items.len() => {
+                                self.screen.cursor.attrs.bg = Some(Color::Rgb(
+                                    sgr_items[i + 1].0 as u8,
+                                    sgr_items[i + 2].0 as u8,
+                                    sgr_items[i + 3].0 as u8,
+                                ));
+                                i += 3;
                             }
                             _ => {}
                         }
                     }
                 }
                 49 => self.screen.cursor.attrs.bg = None,
-                90..=97 => self.screen.cursor.attrs.fg = Some(Color::Indexed((code - 90 + 8) as u8)),
-                100..=107 => self.screen.cursor.attrs.bg = Some(Color::Indexed((code - 100 + 8) as u8)),
+                90..=97 => {
+                    self.screen.cursor.attrs.fg = Some(Color::Indexed((code - 90 + 8) as u8));
+                }
+                100..=107 => {
+                    self.screen.cursor.attrs.bg = Some(Color::Indexed((code - 100 + 8) as u8));
+                }
                 _ => {}
             }
             i += 1;
